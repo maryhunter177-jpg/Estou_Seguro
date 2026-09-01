@@ -11,10 +11,10 @@ object DatabaseFactory {
         jdbcUrl = config.databaseUrl
         username = config.databaseUser
         password = config.databasePassword
-        maximumPoolSize = 10
-        minimumIdle = 1
-        connectionTimeout = 10_000
-        validationTimeout = 5_000
+        maximumPoolSize = 4
+        minimumIdle = 0
+        connectionTimeout = 3_000
+        validationTimeout = 2_000
         keepaliveTime = 120_000
         maxLifetime = 1_800_000
         isAutoCommit = true

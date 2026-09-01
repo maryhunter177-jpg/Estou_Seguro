@@ -2,6 +2,7 @@ package br.com.estouseguro.api
 
 import java.nio.charset.StandardCharsets
 import java.sql.ResultSet
+import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
 import javax.sql.DataSource
@@ -80,7 +81,8 @@ class AppRepository(private val dataSource: DataSource, private val config: AppC
             val alertId = UUID.randomUUID()
             c.prepareStatement("INSERT INTO safety_alert(id,device_id,idempotency_key,request_hash,category,latitude,longitude,location_captured_at,state) VALUES (?,?,?,?,?,?,?,?, 'QUEUED')").use { s ->
                 s.setObject(1, alertId); s.setObject(2, deviceId); s.setString(3, key); s.setBytes(4, requestHash); s.setString(5, input.category.name)
-                s.setObject(6, input.latitude); s.setObject(7, input.longitude); s.setObject(8, input.capturedAt); s.executeUpdate()
+                s.setObject(6, input.latitude); s.setObject(7, input.longitude)
+                s.setTimestamp(8, input.capturedAt?.let(Timestamp::from)); s.executeUpdate()
             }
             c.prepareStatement("""INSERT INTO whatsapp_delivery(id,alert_id,contact_id,recipient_phone,state)
                 SELECT gen_random_uuid(), ?, id, phone_e164, 'PENDING' FROM trusted_contact WHERE device_id=? AND consent_status='GRANTED'""").use { s -> s.setObject(1, alertId); s.setObject(2, deviceId); s.executeUpdate() }

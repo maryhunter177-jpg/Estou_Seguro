@@ -1,0 +1,9 @@
+.gradle
+.kotlin
+build
+.env
+.env.*
+!.env.example
+compose.yaml
+README.md
+**/*.log

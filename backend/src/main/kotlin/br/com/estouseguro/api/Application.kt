@@ -91,6 +91,8 @@ fun Application.module(config: AppConfig) {
             call.respondText(call.request.queryParameters["hub.challenge"].orEmpty(), ContentType.Text.Plain)
         }
         post("/webhooks/whatsapp") {
+            if (config.meta.appSecret.isBlank())
+                throw ApiException(503, "WEBHOOK_DISABLED", "Webhook ainda não configurado")
             val bytes = call.receive<ByteArray>()
             if (!SecureTokens.verifyHexHmac(call.request.header("X-Hub-Signature-256"), config.meta.appSecret, bytes))
                 throw ApiException(401, "INVALID_SIGNATURE", "Assinatura inválida")

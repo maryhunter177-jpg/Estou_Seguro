@@ -12,6 +12,7 @@ local.properties
 .env
 .env.*
 !.env.example
+.render-api-key
 captures/
 .externalNativeBuild/
 .cxx/

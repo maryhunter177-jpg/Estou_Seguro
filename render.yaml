@@ -33,12 +33,6 @@ services:
         generateValue: true
       - key: META_GRAPH_VERSION
         value: v26.0
-      - key: META_PHONE_NUMBER_ID
-        sync: false
-      - key: META_ACCESS_TOKEN
-        sync: false
-      - key: META_APP_SECRET
-        sync: false
       - key: META_WEBHOOK_VERIFY_TOKEN
         generateValue: true
       - key: META_TEMPLATE_NAME

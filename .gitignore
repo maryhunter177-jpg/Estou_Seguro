@@ -13,6 +13,9 @@ sandbox.local.properties
 .env
 .env.*
 !.env.example
+.meta-access-token
+.meta-app-secret
+.tmp-meta-template.json
 .render-api-key
 captures/
 .externalNativeBuild/

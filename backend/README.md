@@ -10,6 +10,8 @@ API Kotlin/Ktor com PostgreSQL e fila transacional para alertas pela API oficial
 4. Suba PostgreSQL e API com `docker compose up --build`.
 5. Exponha a API por HTTPS e configure `/webhooks/whatsapp` como callback da Meta.
 
+O arquivo `../render.yaml` oferece uma publicação sandbox por Blueprint no Render. Os planos gratuitos são adequados somente para desenvolvimento: podem suspender recursos e não oferecem a disponibilidade necessária para uma emergência real.
+
 Com `WORKER_ENABLED=false`, a aplicação e os testes funcionam sem credenciais de envio. Ative o worker somente depois de configurar o sandbox da Meta.
 
 ## Garantias implementadas

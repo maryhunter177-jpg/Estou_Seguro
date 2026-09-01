@@ -1,5 +1,7 @@
 package br.com.estouseguro.api
 
+import java.net.URI
+
 data class AppConfig(
     val environment: String,
     val port: Int,
@@ -32,8 +34,10 @@ data class AppConfig(
             val config = AppConfig(
                 environment = env["APP_ENV"] ?: "sandbox",
                 port = (env["PORT"] ?: "8080").toInt(),
-                publicBaseUrl = required("PUBLIC_BASE_URL").trimEnd('/'),
-                databaseUrl = required("DATABASE_URL"),
+                publicBaseUrl = (env["PUBLIC_BASE_URL"]?.takeIf(String::isNotBlank)
+                    ?: env["RENDER_EXTERNAL_HOSTNAME"]?.let { "https://$it" }
+                    ?: error("Missing required environment variable: PUBLIC_BASE_URL")).trimEnd('/'),
+                databaseUrl = normalizeDatabaseUrl(required("DATABASE_URL")),
                 databaseUser = required("DATABASE_USER"),
                 databasePassword = required("DATABASE_PASSWORD"),
                 deviceTokenPepper = required("DEVICE_TOKEN_PEPPER"),
@@ -54,6 +58,14 @@ data class AppConfig(
             return config
         }
     }
+}
+
+internal fun normalizeDatabaseUrl(value: String): String {
+    if (value.startsWith("jdbc:postgresql://")) return value
+    if (!value.startsWith("postgresql://") && !value.startsWith("postgres://")) return value
+    val uri = URI(value)
+    val port = if (uri.port == -1) "" else ":${uri.port}"
+    return "jdbc:postgresql://${uri.host}$port${uri.path}"
 }
 
 data class MetaConfig(

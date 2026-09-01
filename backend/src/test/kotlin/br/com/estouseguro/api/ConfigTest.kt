@@ -28,4 +28,9 @@ class ConfigTest {
         assertEquals("Violência contra a mulher", categoryLabel(AlertCategory.DOMESTIC_VIOLENCE))
         AlertCategory.entries.forEach { require(categoryLabel(it).isNotBlank()) }
     }
+
+    @Test fun `converte conexao gerenciada em jdbc sem credenciais na url`() {
+        assertEquals("jdbc:postgresql://db.internal:5432/estou_seguro",
+            normalizeDatabaseUrl("postgresql://user:secret@db.internal:5432/estou_seguro"))
+    }
 }

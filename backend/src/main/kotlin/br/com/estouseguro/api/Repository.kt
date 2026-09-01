@@ -8,16 +8,68 @@ import java.util.UUID
 import javax.sql.DataSource
 
 class AppRepository(private val dataSource: DataSource, private val config: AppConfig) {
-    fun registerDevice(displayName: String): RegisterDeviceResponse {
+    fun issueActivationCode(): ActivationCodeResponse {
+        check(!config.isProduction) { "Activation codes are only available in sandbox" }
+        val createdAt = Instant.now()
+        val expiresAt = SandboxActivationCodes.expiresAt(createdAt)
+        val displayedCode = SandboxActivationCodes.generate()
+        val normalizedCode = checkNotNull(SandboxActivationCodes.normalize(displayedCode))
+        dataSource.transaction { c ->
+            c.prepareStatement(
+                "DELETE FROM sandbox_activation_code WHERE expires_at < now()-interval '1 day' OR consumed_at < now()-interval '1 day'"
+            ).use { it.executeUpdate() }
+            c.prepareStatement(
+                "INSERT INTO sandbox_activation_code(id,code_hash,created_at,expires_at) VALUES (?,?,?,?)"
+            ).use { s ->
+                s.setObject(1, UUID.randomUUID())
+                s.setBytes(2, activationCodeHash(normalizedCode))
+                s.setTimestamp(3, Timestamp.from(createdAt))
+                s.setTimestamp(4, Timestamp.from(expiresAt))
+                s.executeUpdate()
+            }
+        }
+        return ActivationCodeResponse(displayedCode, expiresAt)
+    }
+
+    fun registerDevice(displayName: String, activationCode: String): RegisterDeviceResponse {
         val name = displayName.trim().take(80)
         require(name.length >= 2) { "Informe um nome válido" }
+        val normalizedCode = SandboxActivationCodes.normalize(activationCode)
+            ?: throw ApiException(401, "ACTIVATION_CODE_INVALID", ACTIVATION_CODE_ERROR)
         val id = UUID.randomUUID()
         val token = SecureTokens.randomToken()
-        dataSource.connection.use { c -> c.prepareStatement(
-            "INSERT INTO device_account(id, display_name, access_token_hash) VALUES (?, ?, ?)"
-        ).use { s -> s.setObject(1, id); s.setString(2, name); s.setBytes(3, SecureTokens.hmac(config.deviceTokenPepper, token)); s.executeUpdate() } }
+        dataSource.transaction { c ->
+            val codeId = c.prepareStatement(
+                "SELECT id FROM sandbox_activation_code WHERE code_hash=? AND consumed_at IS NULL AND expires_at>now() FOR UPDATE"
+            ).use { s ->
+                s.setBytes(1, activationCodeHash(normalizedCode))
+                s.executeQuery().use { r ->
+                    if (!r.next()) throw ApiException(401, "ACTIVATION_CODE_INVALID", ACTIVATION_CODE_ERROR)
+                    r.getObject(1, UUID::class.java)
+                }
+            }
+            c.prepareStatement(
+                "INSERT INTO device_account(id, display_name, access_token_hash) VALUES (?, ?, ?)"
+            ).use { s ->
+                s.setObject(1, id)
+                s.setString(2, name)
+                s.setBytes(3, SecureTokens.hmac(config.deviceTokenPepper, token))
+                s.executeUpdate()
+            }
+            val consumed = c.prepareStatement(
+                "UPDATE sandbox_activation_code SET consumed_at=now(),consumed_device_id=? WHERE id=? AND consumed_at IS NULL AND expires_at>now()"
+            ).use { s ->
+                s.setObject(1, id)
+                s.setObject(2, codeId)
+                s.executeUpdate()
+            }
+            check(consumed == 1) { "Activation code claim lost inside locked transaction" }
+        }
         return RegisterDeviceResponse(id, token)
     }
+
+    private fun activationCodeHash(normalizedCode: String): ByteArray =
+        SecureTokens.hmac(config.deviceTokenPepper, "sandbox-activation:$normalizedCode")
 
     fun authenticate(token: String): DevicePrincipal? {
         if (token.isBlank()) return null
@@ -38,7 +90,9 @@ class AppRepository(private val dataSource: DataSource, private val config: AppC
                 VALUES (?, ?, ?, ?, 'PENDING', ?)
                 ON CONFLICT(device_id, phone_e164) DO UPDATE SET name=EXCLUDED.name,
                   consent_token_hash=CASE WHEN trusted_contact.consent_status='GRANTED' THEN trusted_contact.consent_token_hash ELSE EXCLUDED.consent_token_hash END,
-                  consent_status=CASE WHEN trusted_contact.consent_status='GRANTED' THEN 'GRANTED' ELSE 'PENDING' END, updated_at=now()
+                  consent_status=CASE WHEN trusted_contact.consent_status='GRANTED' THEN 'GRANTED' ELSE 'PENDING' END,
+                  revoked_at=CASE WHEN trusted_contact.consent_status='GRANTED' THEN trusted_contact.revoked_at ELSE NULL END,
+                  updated_at=now()
                 RETURNING id, consent_status"""
         ).use { s ->
             s.setObject(1, id); s.setObject(2, deviceId); s.setString(3, name); s.setString(4, phone); s.setBytes(5, consentHash)
@@ -60,8 +114,48 @@ class AppRepository(private val dataSource: DataSource, private val config: AppC
     fun grantConsent(token: String): Boolean {
         val hash = SecureTokens.hmac(config.consentTokenPepper, token)
         dataSource.connection.use { c -> c.prepareStatement(
-            "UPDATE trusted_contact SET consent_status='GRANTED', consented_at=now(), consent_token_hash=NULL, updated_at=now() WHERE consent_token_hash=? AND consent_status='PENDING'"
+            "UPDATE trusted_contact SET consent_status='GRANTED', consented_at=now(), revoked_at=NULL, updated_at=now() WHERE consent_token_hash=? AND consent_status='PENDING'"
         ).use { s -> s.setBytes(1, hash); return s.executeUpdate() == 1 } }
+    }
+
+    fun consentStatus(token: String): String? {
+        val hash = SecureTokens.hmac(config.consentTokenPepper, token)
+        dataSource.connection.use { c -> c.prepareStatement(
+            "SELECT consent_status FROM trusted_contact WHERE consent_token_hash=?"
+        ).use { s -> s.setBytes(1, hash); s.executeQuery().use { r -> return if (r.next()) r.getString(1) else null } } }
+    }
+
+    fun revokeConsent(token: String): Boolean {
+        val hash = SecureTokens.hmac(config.consentTokenPepper, token)
+        return dataSource.transaction { c ->
+            val contactId = c.prepareStatement(
+                "SELECT id FROM trusted_contact WHERE consent_token_hash=? AND consent_status IN ('PENDING','GRANTED') FOR UPDATE"
+            ).use { s ->
+                s.setBytes(1, hash)
+                s.executeQuery().use { r -> if (r.next()) r.getObject(1, UUID::class.java) else null }
+            } ?: return@transaction false
+            c.prepareStatement(
+                "UPDATE trusted_contact SET consent_status='REVOKED', revoked_at=now(), updated_at=now() WHERE id=?"
+            ).use { s -> s.setObject(1, contactId); s.executeUpdate() }
+            cancelPendingDeliveries(c, contactId)
+            true
+        }
+    }
+
+    fun revokeContact(deviceId: UUID, contactId: UUID): Boolean = dataSource.transaction { c ->
+        val found = c.prepareStatement(
+            "SELECT 1 FROM trusted_contact WHERE id=? AND device_id=? FOR UPDATE"
+        ).use { s ->
+            s.setObject(1, contactId)
+            s.setObject(2, deviceId)
+            s.executeQuery().use { it.next() }
+        }
+        if (!found) return@transaction false
+        c.prepareStatement(
+            "UPDATE trusted_contact SET consent_status='REVOKED', consent_token_hash=NULL, revoked_at=now(), updated_at=now() WHERE id=?"
+        ).use { s -> s.setObject(1, contactId); s.executeUpdate() }
+        cancelPendingDeliveries(c, contactId)
+        true
     }
 
     fun createAlert(deviceId: UUID, key: String, input: CreateAlertRequest): CreateAlertResponse {
@@ -86,8 +180,41 @@ class AppRepository(private val dataSource: DataSource, private val config: AppC
             }
             c.prepareStatement("""INSERT INTO whatsapp_delivery(id,alert_id,contact_id,recipient_phone,state)
                 SELECT gen_random_uuid(), ?, id, phone_e164, 'PENDING' FROM trusted_contact WHERE device_id=? AND consent_status='GRANTED'""").use { s -> s.setObject(1, alertId); s.setObject(2, deviceId); s.executeUpdate() }
-            counts(c, alertId, "QUEUED")
+            refreshAlertState(c, alertId)
+            counts(c, alertId, readAlertState(c, alertId))
         }
+    }
+
+    fun getAlertStatus(deviceId: UUID, alertId: UUID): AlertStatusResponse = dataSource.connection.use { c ->
+        val header = c.prepareStatement(
+            "SELECT state,category,created_at FROM safety_alert WHERE id=? AND device_id=?"
+        ).use { s ->
+            s.setObject(1, alertId)
+            s.setObject(2, deviceId)
+            s.executeQuery().use { r ->
+                if (!r.next()) throw ApiException(404, "ALERT_NOT_FOUND", "Alerta não encontrado")
+                Triple(r.getString(1), AlertCategory.valueOf(r.getString(2)), r.getTimestamp(3).toInstant())
+            }
+        }
+        val recipients = counts(c, alertId, header.first)
+        val deliveryCounts = c.prepareStatement(
+            """SELECT
+                count(*) FILTER (WHERE state IN ('PENDING','RETRY')),
+                count(*) FILTER (WHERE state IN ('CLAIMED','ACCEPTED','SENT')),
+                count(*) FILTER (WHERE state IN ('DELIVERED','READ')),
+                count(*) FILTER (WHERE state='FAILED')
+               FROM whatsapp_delivery WHERE alert_id=?"""
+        ).use { s ->
+            s.setObject(1, alertId)
+            s.executeQuery().use { r ->
+                r.next()
+                DeliveryStatusCounts(r.getInt(1), r.getInt(2), r.getInt(3), r.getInt(4))
+            }
+        }
+        AlertStatusResponse(
+            alertId, header.first, header.second, header.third,
+            recipients.authorizedRecipients, recipients.pendingConsentRecipients, deliveryCounts,
+        )
     }
 
     private fun counts(c: java.sql.Connection, id: UUID, state: String): CreateAlertResponse {
@@ -105,17 +232,30 @@ class AppRepository(private val dataSource: DataSource, private val config: AppC
         if (jobs.isNotEmpty()) c.prepareStatement("UPDATE whatsapp_delivery SET state='CLAIMED',claimed_at=now(),attempt_count=attempt_count+1,updated_at=now() WHERE id = ANY (?)").use { s ->
             s.setArray(1, c.createArrayOf("uuid", jobs.map { it.id }.toTypedArray())); s.executeUpdate()
         }
+        jobs.map { it.alertId }.distinct().forEach { refreshAlertState(c, it) }
         jobs
     }
 
-    fun markAccepted(id: UUID, providerId: String) = update(id, "ACCEPTED", providerId, null)
+    fun markAccepted(id: UUID, providerId: String) = updateDelivery(id, "ACCEPTED", providerId, null)
     fun markRetry(id: UUID, attempts: Int, error: String) {
         val terminal = attempts + 1 >= 5
-        dataSource.connection.use { c -> c.prepareStatement("UPDATE whatsapp_delivery SET state=?,last_error=?,next_attempt_at=now()+(? * interval '1 minute'),updated_at=now() WHERE id=?").use { s ->
-            s.setString(1, if (terminal) "FAILED" else "RETRY"); s.setString(2, error.take(500)); s.setInt(3, 1 shl attempts.coerceAtMost(5)); s.setObject(4, id); s.executeUpdate()
-        } }
+        dataSource.transaction { c ->
+            val alertId = deliveryAlertId(c, id) ?: return@transaction
+            c.prepareStatement("UPDATE whatsapp_delivery SET state=?,last_error=?,next_attempt_at=now()+(? * interval '1 minute'),updated_at=now() WHERE id=? AND state='CLAIMED'").use { s ->
+                s.setString(1, if (terminal) "FAILED" else "RETRY"); s.setString(2, error.take(500)); s.setInt(3, 1 shl attempts.coerceAtMost(5)); s.setObject(4, id); s.executeUpdate()
+            }
+            refreshAlertState(c, alertId)
+        }
     }
-    private fun update(id: UUID, state: String, providerId: String?, error: String?) { dataSource.connection.use { c -> c.prepareStatement("UPDATE whatsapp_delivery SET state=?,provider_message_id=?,last_error=?,updated_at=now() WHERE id=?").use { s -> s.setString(1,state); s.setString(2,providerId); s.setString(3,error); s.setObject(4,id); s.executeUpdate() } } }
+    private fun updateDelivery(id: UUID, state: String, providerId: String?, error: String?) {
+        dataSource.transaction { c ->
+            val alertId = deliveryAlertId(c, id) ?: return@transaction
+            c.prepareStatement("UPDATE whatsapp_delivery SET state=?,provider_message_id=?,last_error=?,updated_at=now() WHERE id=? AND state='CLAIMED'").use { s ->
+                s.setString(1,state); s.setString(2,providerId); s.setString(3,error); s.setObject(4,id); s.executeUpdate()
+            }
+            refreshAlertState(c, alertId)
+        }
+    }
     fun applyProviderEvent(eventId: String, providerId: String, state: String, error: String?) {
         if (state !in setOf("SENT","DELIVERED","READ","FAILED")) return
         dataSource.transaction { c ->
@@ -125,9 +265,9 @@ class AppRepository(private val dataSource: DataSource, private val config: AppC
             if (!inserted) return@transaction
             c.prepareStatement("""UPDATE whatsapp_delivery SET
                 state=CASE
-                  WHEN ?='FAILED' AND state NOT IN ('DELIVERED','READ') THEN 'FAILED'
-                  WHEN ?='READ' THEN 'READ'
-                  WHEN ?='DELIVERED' AND state NOT IN ('READ') THEN 'DELIVERED'
+                  WHEN ?='FAILED' AND state NOT IN ('DELIVERED','READ','FAILED') THEN 'FAILED'
+                  WHEN ?='READ' AND state IN ('CLAIMED','ACCEPTED','SENT','DELIVERED') THEN 'READ'
+                  WHEN ?='DELIVERED' AND state IN ('CLAIMED','ACCEPTED','SENT') THEN 'DELIVERED'
                   WHEN ?='SENT' AND state IN ('ACCEPTED','CLAIMED') THEN 'SENT'
                   ELSE state END,
                 last_error=CASE WHEN ?='FAILED' THEN ? ELSE last_error END, updated_at=now()
@@ -135,9 +275,80 @@ class AppRepository(private val dataSource: DataSource, private val config: AppC
                 s.setString(1,state); s.setString(2,state); s.setString(3,state); s.setString(4,state)
                 s.setString(5,state); s.setString(6,error?.take(500)); s.setString(7,providerId); s.executeUpdate()
             }
+            c.prepareStatement("SELECT alert_id FROM whatsapp_delivery WHERE provider_message_id=?").use { s ->
+                s.setString(1, providerId)
+                s.executeQuery().use { r -> if (r.next()) refreshAlertState(c, r.getObject(1, UUID::class.java)) }
+            }
         }
     }
+
+    private fun deliveryAlertId(c: java.sql.Connection, deliveryId: UUID): UUID? =
+        c.prepareStatement("SELECT alert_id FROM whatsapp_delivery WHERE id=? FOR UPDATE").use { s ->
+            s.setObject(1, deliveryId)
+            s.executeQuery().use { r -> if (r.next()) r.getObject(1, UUID::class.java) else null }
+        }
+
+    private fun readAlertState(c: java.sql.Connection, alertId: UUID): String =
+        c.prepareStatement("SELECT state FROM safety_alert WHERE id=?").use { s ->
+            s.setObject(1, alertId)
+            s.executeQuery().use { r -> check(r.next()); r.getString(1) }
+        }
+
+    private fun refreshAlertState(c: java.sql.Connection, alertId: UUID) {
+        val current = c.prepareStatement("SELECT state FROM safety_alert WHERE id=? FOR UPDATE").use { s ->
+            s.setObject(1, alertId)
+            s.executeQuery().use { r -> if (r.next()) r.getString(1) else return }
+        }
+        val deliveryStates = mutableListOf<String>()
+        c.prepareStatement("SELECT state FROM whatsapp_delivery WHERE alert_id=?").use { s ->
+            s.setObject(1, alertId)
+            s.executeQuery().use { r -> while (r.next()) deliveryStates += r.getString(1) }
+        }
+        val aggregated = aggregateAlertState(current, deliveryStates)
+        if (aggregated != current) c.prepareStatement("UPDATE safety_alert SET state=? WHERE id=?").use { s ->
+            s.setString(1, aggregated)
+            s.setObject(2, alertId)
+            s.executeUpdate()
+        }
+    }
+
+    private fun cancelPendingDeliveries(c: java.sql.Connection, contactId: UUID) {
+        val alertIds = mutableListOf<UUID>()
+        c.prepareStatement(
+            "SELECT alert_id FROM whatsapp_delivery WHERE contact_id=? AND state IN ('PENDING','RETRY','CLAIMED') FOR UPDATE"
+        ).use { s ->
+            s.setObject(1, contactId)
+            s.executeQuery().use { r -> while (r.next()) alertIds += r.getObject(1, UUID::class.java) }
+        }
+        if (alertIds.isEmpty()) return
+        c.prepareStatement(
+            "UPDATE whatsapp_delivery SET state='FAILED', last_error='CONSENT_REVOKED', updated_at=now() WHERE contact_id=? AND state IN ('PENDING','RETRY','CLAIMED')"
+        ).use { s -> s.setObject(1, contactId); s.executeUpdate() }
+        alertIds.distinct().forEach { refreshAlertState(c, it) }
+    }
     fun ready(): Boolean = dataSource.connection.use { c -> c.prepareStatement("SELECT 1").use { s -> s.executeQuery().use { it.next() } } }
+
+    companion object {
+        private const val ACTIVATION_CODE_ERROR = "Código de ativação inválido, expirado ou já utilizado"
+    }
+}
+
+internal fun aggregateAlertState(current: String, deliveryStates: List<String>): String {
+    if (current in setOf("COMPLETE", "PARTIAL", "FAILED")) return current
+    if (deliveryStates.isEmpty()) return "FAILED"
+    val hasProcessing = deliveryStates.any { it in setOf("CLAIMED", "ACCEPTED", "SENT") }
+    val hasQueued = deliveryStates.any { it in setOf("PENDING", "RETRY") }
+    if (hasProcessing || hasQueued) {
+        return if (current == "PROCESSING" || hasProcessing) "PROCESSING" else "QUEUED"
+    }
+    val delivered = deliveryStates.count { it in setOf("DELIVERED", "READ") }
+    val failed = deliveryStates.count { it == "FAILED" }
+    return when {
+        delivered == deliveryStates.size -> "COMPLETE"
+        failed == deliveryStates.size -> "FAILED"
+        delivered + failed == deliveryStates.size -> "PARTIAL"
+        else -> current
+    }
 }
 
 private fun ResultSet.toJob(): DeliveryJob {

@@ -54,34 +54,64 @@ fun Application.module(config: AppConfig) {
         get("/health/live") { call.respond(mapOf("status" to "UP")) }
         get("/health/ready") { if (repository.ready()) call.respond(mapOf("status" to "UP")) else call.respond(HttpStatusCode.ServiceUnavailable) }
 
-        post("/v1/devices/register") {
+        post("/ops/v1/activation-codes") {
             if (config.isProduction) throw ApiException(404, "NOT_FOUND", "Rota indisponível")
             val supplied = call.request.header("X-Sandbox-Registration-Key").orEmpty()
-            if (!constantEquals(supplied, config.sandboxRegistrationKey)) throw ApiException(401, "UNAUTHORIZED", "Chave de sandbox inválida")
-            call.respond(HttpStatusCode.Created, repository.registerDevice(call.receive<RegisterDeviceRequest>().displayName))
+            if (!constantEquals(supplied, config.sandboxRegistrationKey))
+                throw ApiException(401, "UNAUTHORIZED", "Chave operacional inválida")
+            call.respond(HttpStatusCode.Created, repository.issueActivationCode())
+        }
+
+        post("/v1/devices/register") {
+            if (config.isProduction) throw ApiException(404, "NOT_FOUND", "Rota indisponível")
+            val activationCode = call.request.header("X-Sandbox-Activation-Code").orEmpty()
+            call.respond(
+                HttpStatusCode.Created,
+                repository.registerDevice(call.receive<RegisterDeviceRequest>().displayName, activationCode),
+            )
         }
 
         authenticate("device") {
             route("/v1/contacts") {
                 get { call.respond(repository.listContacts(call.principal<DevicePrincipal>()!!.deviceId)) }
                 post { call.respond(HttpStatusCode.Created, repository.saveContact(call.principal<DevicePrincipal>()!!.deviceId, call.receive<ContactRequest>())) }
+                delete("/{id}") {
+                    val contactId = call.parameters["id"]?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+                        ?: throw ApiException(404, "CONTACT_NOT_FOUND", "Contato não encontrado")
+                    if (!repository.revokeContact(call.principal<DevicePrincipal>()!!.deviceId, contactId))
+                        throw ApiException(404, "CONTACT_NOT_FOUND", "Contato não encontrado")
+                    call.respond(HttpStatusCode.NoContent)
+                }
             }
             post("/v1/alerts") {
                 val key = call.request.header("Idempotency-Key") ?: throw ApiException(400, "MISSING_IDEMPOTENCY_KEY", "Envie o cabeçalho Idempotency-Key")
                 call.respond(HttpStatusCode.Accepted, repository.createAlert(call.principal<DevicePrincipal>()!!.deviceId, key, call.receive<CreateAlertRequest>()))
+            }
+            get("/v1/alerts/{id}") {
+                val alertId = call.parameters["id"]?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+                    ?: throw ApiException(404, "ALERT_NOT_FOUND", "Alerta não encontrado")
+                call.respond(repository.getAlertStatus(call.principal<DevicePrincipal>()!!.deviceId, alertId))
             }
         }
 
         get("/consent/{token}") {
             val token = call.parameters["token"].orEmpty()
             if (!token.matches(Regex("[A-Za-z0-9_-]{40,64}"))) throw ApiException(404, "INVALID_LINK", "Link inválido ou expirado")
-            call.respondText(consentPage(token), ContentType.Text.Html)
+            val status = repository.consentStatus(token)
+                ?: throw ApiException(404, "INVALID_LINK", "Link inválido ou expirado")
+            call.respondText(consentPage(token, status), ContentType.Text.Html)
         }
         post("/consent/{token}") {
             val token = call.parameters["token"].orEmpty()
             if (!token.matches(Regex("[A-Za-z0-9_-]{40,64}")) || !repository.grantConsent(token))
                 throw ApiException(404, "INVALID_LINK", "Link inválido, expirado ou já utilizado")
             call.respondText("<html lang='pt-BR'><meta charset='utf-8'><title>Consentimento confirmado</title><body><h1>Consentimento confirmado</h1><p>Você poderá receber alertas de emergência do Estou Seguro.</p></body></html>", ContentType.Text.Html)
+        }
+        post("/consent/{token}/revoke") {
+            val token = call.parameters["token"].orEmpty()
+            if (!token.matches(Regex("[A-Za-z0-9_-]{40,64}")) || !repository.revokeConsent(token))
+                throw ApiException(404, "INVALID_LINK", "Link inválido, expirado ou já revogado")
+            call.respondText("<html lang='pt-BR'><meta charset='utf-8'><title>Consentimento revogado</title><body><h1>Consentimento revogado</h1><p>Este contato não receberá novos alertas do Estou Seguro.</p></body></html>", ContentType.Text.Html)
         }
 
         get("/webhooks/whatsapp") {
@@ -118,4 +148,8 @@ private fun processWebhook(root: JsonNode, repository: AppRepository) {
 
 private fun constantEquals(a: String, b: String): Boolean = MessageDigest.isEqual(a.toByteArray(), b.toByteArray())
 
-private fun consentPage(token: String) = """<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Estou Seguro</title><style>body{font:18px system-ui;max-width:38rem;margin:4rem auto;padding:1.5rem;color:#102638}button{background:#0b4668;color:white;border:0;border-radius:12px;padding:1rem 1.4rem;font-weight:700}</style><body><h1>Autorizar alertas</h1><p>Ao confirmar, você autoriza o Estou Seguro a enviar mensagens de emergência pelo WhatsApp. Você poderá revogar o consentimento posteriormente.</p><form method="post" action="/consent/$token"><button type="submit">AUTORIZAR ALERTAS</button></form></body></html>"""
+internal fun consentPage(token: String, status: String) = when (status) {
+    "PENDING" -> """<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Estou Seguro</title><style>body{font:18px system-ui;max-width:38rem;margin:4rem auto;padding:1.5rem;color:#102638}button{background:#0b4668;color:white;border:0;border-radius:12px;padding:1rem 1.4rem;font-weight:700}</style><body><h1>Autorizar alertas</h1><p>Ao confirmar, você autoriza o Estou Seguro a enviar mensagens de emergência pelo WhatsApp. O mesmo link permite revogar a autorização posteriormente.</p><form method="post" action="/consent/$token"><button type="submit">AUTORIZAR ALERTAS</button></form></body></html>"""
+    "GRANTED" -> """<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Estou Seguro</title><style>body{font:18px system-ui;max-width:38rem;margin:4rem auto;padding:1.5rem;color:#102638}button{background:#9f1d25;color:white;border:0;border-radius:12px;padding:1rem 1.4rem;font-weight:700}</style><body><h1>Alertas autorizados</h1><p>Você autorizou alertas de emergência. É possível revogar essa autorização agora.</p><form method="post" action="/consent/$token/revoke"><button type="submit">REVOGAR AUTORIZAÇÃO</button></form></body></html>"""
+    else -> """<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Estou Seguro</title><body><h1>Consentimento revogado</h1><p>Este contato não receberá novos alertas.</p></body></html>"""
+}

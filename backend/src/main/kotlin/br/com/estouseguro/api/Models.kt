@@ -8,6 +8,7 @@ data class DevicePrincipal(val deviceId: UUID) : Principal
 
 data class RegisterDeviceRequest(val displayName: String = "")
 data class RegisterDeviceResponse(val deviceId: UUID, val accessToken: String)
+data class ActivationCodeResponse(val code: String, val expiresAt: Instant)
 
 data class ContactRequest(val name: String = "", val phone: String = "")
 data class ContactResponse(
@@ -34,6 +35,23 @@ data class CreateAlertResponse(
     val state: String,
     val authorizedRecipients: Int,
     val pendingConsentRecipients: Int,
+)
+
+data class DeliveryStatusCounts(
+    val queued: Int,
+    val processing: Int,
+    val delivered: Int,
+    val failed: Int,
+)
+
+data class AlertStatusResponse(
+    val alertId: UUID,
+    val state: String,
+    val category: AlertCategory,
+    val createdAt: Instant,
+    val authorizedRecipients: Int,
+    val pendingConsentRecipients: Int,
+    val deliveries: DeliveryStatusCounts,
 )
 
 data class ErrorResponse(val code: String, val message: String, val requestId: String? = null)

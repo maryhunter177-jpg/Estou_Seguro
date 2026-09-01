@@ -54,6 +54,10 @@ import br.com.estouseguro.domain.repository.DocumentSide
 import br.com.estouseguro.platform.ShareDispatcher
 import br.com.estouseguro.platform.SmsAlertDispatcher
 import br.com.estouseguro.platform.SmsDispatchResult
+import br.com.estouseguro.platform.backend.BackendAlertCategory
+import br.com.estouseguro.platform.backend.BackendActivationRequiredException
+import br.com.estouseguro.platform.backend.CloudAlertResult
+import br.com.estouseguro.platform.backend.SandboxBackendClient
 import java.text.DateFormat
 import java.io.File
 import java.io.ByteArrayOutputStream
@@ -75,6 +79,8 @@ class MainActivity : android.app.Activity() {
     private var smsDispatchInProgress = false
     private var pendingDocumentImage: PendingDocumentImage? = null
     private var pendingCaptureFile: File? = null
+    private var backendActivationDialog: AlertDialog? = null
+    private val pendingBackendRetries = mutableListOf<() -> Unit>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -698,7 +704,11 @@ class MainActivity : android.app.Activity() {
                             container.manageContacts.update(existing.id, name.text.toString(), phone.text.toString())
                         }
                     },
-                    onSuccess = { dialog.dismiss(); showDashboard() },
+                    onSuccess = { saved ->
+                        dialog.dismiss()
+                        showDashboard()
+                        syncContactWithBackend(saved)
+                    },
                     onError = { showError(it.message ?: "Contato inválido ou já cadastrado.") },
                 )
             }
@@ -714,7 +724,10 @@ class MainActivity : android.app.Activity() {
             .setPositiveButton("Remover") { _, _ ->
                 runIo(
                     action = { container.manageContacts.delete(contact.id) },
-                    onSuccess = { showDashboard() },
+                    onSuccess = {
+                        showDashboard()
+                        removeContactFromBackend(contact.id)
+                    },
                     onError = { showError("Não foi possível remover o contato.") },
                 )
             }
@@ -789,6 +802,7 @@ class MainActivity : android.app.Activity() {
             },
             onSuccess = { prepared ->
                 pendingPreparedAlert = prepared
+                enqueueCloudAlert(prepared, pendingEmergencyType.backendCategory())
                 dispatchPreparedAlert()
             },
             onError = { showError(it.message ?: "Não foi possível preparar o alerta.") },
@@ -936,6 +950,192 @@ class MainActivity : android.app.Activity() {
             .show()
     }
 
+    private fun syncContactWithBackend(contact: TrustedContact) {
+        if (!container.sandboxBackend.isEnabled) return
+        val displayName = container.sessionRepository.displayName()
+        container.cloudExecutor.execute {
+            runCatching { container.sandboxBackend.syncContact(displayName, contact) }.fold(
+                onSuccess = { result -> runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    result.consentUrl?.let { showConsentLink(contact.name, it) }
+                } },
+                onFailure = { error -> runOnUiThread {
+                    if (!isFinishing && !isDestroyed) handleBackendFailure(
+                        error = error,
+                        retry = { syncContactWithBackend(contact) },
+                        fallbackMessage = "Contato salvo no celular. A sincronizacao do WhatsApp ficou pendente.",
+                    )
+                } },
+            )
+        }
+    }
+
+    private fun removeContactFromBackend(localId: Long) {
+        if (!container.sandboxBackend.isEnabled) return
+        container.cloudExecutor.execute {
+            runCatching { container.sandboxBackend.removeContact(localId) }
+        }
+    }
+
+    private fun enqueueCloudAlert(prepared: PreparedAlert, category: BackendAlertCategory) {
+        if (!container.sandboxBackend.isEnabled) return
+        val displayName = container.sessionRepository.displayName()
+        container.cloudExecutor.execute {
+            runCatching { container.sandboxBackend.createAlert(displayName, prepared, category) }.fold(
+                onSuccess = { result -> runOnUiThread {
+                    if (!isFinishing && !isDestroyed) showCloudAlertResult(result)
+                } },
+                onFailure = { error -> runOnUiThread {
+                    if (!isFinishing && !isDestroyed) handleBackendFailure(
+                        error = error,
+                        retry = { enqueueCloudAlert(prepared, category) },
+                        fallbackMessage = "Canal WhatsApp oficial indisponivel. O envio local por SMS continuou normalmente.",
+                    )
+                } },
+            )
+        }
+    }
+
+    private fun showCloudAlertResult(result: CloudAlertResult) {
+        when {
+            result.authorizedRecipients > 0 -> Toast.makeText(
+                this,
+                "WhatsApp oficial: alerta entrou na fila para ${result.authorizedRecipients} contato(s) autorizado(s).",
+                Toast.LENGTH_LONG,
+            ).show()
+            result.pendingConsentRecipients > 0 -> {
+                Toast.makeText(
+                    this,
+                    "WhatsApp ainda sem destinatarios autorizados; o SMS local continuou ativo.",
+                    Toast.LENGTH_LONG,
+                ).show()
+                result.pendingConsentUrls.firstOrNull()?.let { showConsentLink("seu contato", it) }
+            }
+        }
+    }
+
+    private fun showConsentLink(contactName: String, consentUrl: String) {
+        AlertDialog.Builder(this)
+            .setTitle("Autorizar WhatsApp oficial")
+            .setMessage("Envie este link para $contactName. A pessoa precisa autorizar uma vez antes de receber alertas automaticos pelo WhatsApp Business. O SMS local nao depende dessa autorizacao.")
+            .setNegativeButton("Depois", null)
+            .setPositiveButton("Compartilhar link") { _, _ ->
+                val share = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, "Autorize meus alertas de emergencia do Estou Seguro: $consentUrl")
+                }
+                startActivity(Intent.createChooser(share, "Enviar autorizacao"))
+            }
+            .show()
+    }
+
+    private fun handleBackendFailure(error: Throwable, retry: () -> Unit, fallbackMessage: String) {
+        if (error is BackendActivationRequiredException) {
+            showBackendActivationDialog(retry)
+        } else {
+            Toast.makeText(this, fallbackMessage, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun showBackendActivationDialog(retry: () -> Unit) {
+        pendingBackendRetries += retry
+        if (backendActivationDialog?.isShowing == true) return
+
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(22), dp(6), dp(22), 0)
+        }
+        val explanation = paragraph(
+            "Digite o codigo temporario de 12 caracteres fornecido para este teste. Ele sera usado uma vez e nao sera salvo. O SMS continua funcionando mesmo sem ativacao.",
+        )
+        val code = input(
+            "XXXX-XXXX-XXXX",
+            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_VARIATION_PASSWORD,
+        ).apply {
+            transformationMethod = PasswordTransformationMethod.getInstance()
+            filters = arrayOf(InputFilter.LengthFilter(14))
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+            contentDescription = "Codigo temporario de ativacao, 12 caracteres"
+        }
+        var formatting = false
+        code.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(value: Editable?) {
+                if (formatting) return
+                val formatted = SandboxBackendClient.formatActivationCode(value?.toString().orEmpty())
+                if (formatted != value?.toString()) {
+                    formatting = true
+                    code.setText(formatted)
+                    code.setSelection(formatted.length)
+                    formatting = false
+                }
+            }
+        })
+        val feedback = TextView(this).apply {
+            setTextColor(RED_DARK)
+            textSize = 13f
+            visibility = View.GONE
+            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_ASSERTIVE
+        }
+        form.addView(explanation)
+        form.addView(fieldLabel("CODIGO DE ATIVACAO"))
+        form.addView(code)
+        form.addView(feedback)
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Ativar WhatsApp oficial")
+            .setView(form)
+            .setNegativeButton("Agora nao", null)
+            .setPositiveButton("Ativar", null)
+            .create()
+        backendActivationDialog = dialog
+        dialog.setOnDismissListener {
+            backendActivationDialog = null
+            pendingBackendRetries.clear()
+            code.text.clear()
+        }
+        dialog.setOnShowListener {
+            val activate = dialog.getButton(AlertDialog.BUTTON_POSITIVE)
+            activate.setOnClickListener {
+                val candidate = code.text.toString().toCharArray()
+                if (SandboxBackendClient.normalizeActivationCode(candidate) == null) {
+                    candidate.fill('\u0000')
+                    feedback.text = "Confira os 12 caracteres do codigo. Letras I, L, O e U nao sao usadas."
+                    feedback.visibility = View.VISIBLE
+                    return@setOnClickListener
+                }
+                feedback.visibility = View.GONE
+                activate.isEnabled = false
+                dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = false
+                container.cloudExecutor.execute {
+                    runCatching {
+                        container.sandboxBackend.activate(container.sessionRepository.displayName(), candidate)
+                    }.fold(
+                        onSuccess = { runOnUiThread {
+                            if (isFinishing || isDestroyed) return@runOnUiThread
+                            val retries = pendingBackendRetries.toList()
+                            pendingBackendRetries.clear()
+                            dialog.dismiss()
+                            retries.forEach { it() }
+                        } },
+                        onFailure = { runOnUiThread {
+                            if (isFinishing || isDestroyed) return@runOnUiThread
+                            code.text.clear()
+                            feedback.text = "Codigo invalido, expirado ou ja utilizado. Solicite outro e tente novamente."
+                            feedback.visibility = View.VISIBLE
+                            feedback.announceForAccessibility(feedback.text)
+                            activate.isEnabled = true
+                            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).isEnabled = true
+                            code.requestFocus()
+                        } },
+                    )
+                }
+            }
+        }
+        dialog.show()
+    }
+
     private fun EmergencyType.smsCategory(): SmsEmergencyCategory = when (this) {
         EmergencyType.GENERAL -> SmsEmergencyCategory.GENERAL
         EmergencyType.MEDICAL -> SmsEmergencyCategory.MEDICAL
@@ -943,6 +1143,15 @@ class MainActivity : android.app.Activity() {
         EmergencyType.DOMESTIC_VIOLENCE -> SmsEmergencyCategory.DOMESTIC_VIOLENCE
         EmergencyType.CHILD_DANGER -> SmsEmergencyCategory.CHILD_DANGER
         EmergencyType.ANXIETY -> SmsEmergencyCategory.ANXIETY
+    }
+
+    private fun EmergencyType.backendCategory(): BackendAlertCategory = when (this) {
+        EmergencyType.GENERAL -> BackendAlertCategory.GENERAL
+        EmergencyType.MEDICAL -> BackendAlertCategory.MEDICAL
+        EmergencyType.SECURITY -> BackendAlertCategory.SECURITY
+        EmergencyType.DOMESTIC_VIOLENCE -> BackendAlertCategory.DOMESTIC_VIOLENCE
+        EmergencyType.CHILD_DANGER -> BackendAlertCategory.CHILD_DANGER
+        EmergencyType.ANXIETY -> BackendAlertCategory.ANXIETY
     }
 
     private fun showSmsFallback(prepared: PreparedAlert, reason: String) {

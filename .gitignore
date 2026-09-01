@@ -3,6 +3,7 @@
 .idea/
 .vscode/
 local.properties
+sandbox.local.properties
 **/build/
 *.iml
 *.apk

@@ -10,6 +10,19 @@ API Kotlin/Ktor com PostgreSQL e fila transacional para alertas pela API oficial
 4. Suba PostgreSQL e API com `docker compose up --build`.
 5. Exponha a API por HTTPS e configure `/webhooks/whatsapp` como callback da Meta.
 
+### Ativação de dispositivo no sandbox
+
+`SANDBOX_REGISTRATION_KEY` é uma chave operacional e nunca deve ser incluída no APK. Um operador
+emite um código descartável chamando `POST /ops/v1/activation-codes` com o header
+`X-Sandbox-Registration-Key`. A resposta `201` contém `code` no formato `XXXX-XXXX-XXXX` e
+`expiresAt`, limitado a 15 minutos.
+
+O aplicativo então chama `POST /v1/devices/register`, envia seu JSON normal e inclui somente
+`X-Sandbox-Activation-Code: XXXX-XXXX-XXXX`. O código não diferencia maiúsculas/minúsculas,
+aceita espaços ou hífens de formatação, é armazenado apenas como HMAC e só pode ser consumido uma
+vez. Código ausente, inválido, expirado ou já usado retorna `401 ACTIVATION_CODE_INVALID` sem
+revelar qual condição ocorreu.
+
 O arquivo `../render.yaml` oferece uma publicação sandbox por Blueprint no Render. Os planos gratuitos são adequados somente para desenvolvimento: podem suspender recursos e não oferecem a disponibilidade necessária para uma emergência real.
 
 Com `WORKER_ENABLED=false`, a aplicação e os testes funcionam sem credenciais de envio. Ative o worker somente depois de configurar o sandbox da Meta.

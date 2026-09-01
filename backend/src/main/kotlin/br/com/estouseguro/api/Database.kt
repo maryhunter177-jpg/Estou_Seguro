@@ -64,8 +64,11 @@ class MigrationRunner(private val dataSource: DataSource) {
         }
     }
 
-    private fun migrations(): List<Migration> = listOf(1).map { version ->
-        val path = "/db/migration/V${version}__init.sql"
+    private fun migrations(): List<Migration> = listOf(
+        1 to "/db/migration/V1__init.sql",
+        2 to "/db/migration/V2__consent_revocation.sql",
+        3 to "/db/migration/V3__sandbox_activation_codes.sql",
+    ).map { (version, path) ->
         val sql = requireNotNull(javaClass.getResourceAsStream(path)) { "Missing migration $path" }
             .bufferedReader().use { it.readText() }
         Migration(version, sql, MessageDigest.getInstance("SHA-256").digest(sql.toByteArray()).toHex())

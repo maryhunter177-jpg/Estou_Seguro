@@ -4,6 +4,7 @@ import android.app.Application
 import br.com.estouseguro.data.local.EstouSeguroDatabase
 import br.com.estouseguro.data.repository.SecureSessionRepository
 import br.com.estouseguro.data.repository.KeystoreMedicalProfileRepository
+import br.com.estouseguro.data.repository.KeystoreDocumentVaultRepository
 import br.com.estouseguro.data.repository.SqliteAlertRepository
 import br.com.estouseguro.data.repository.SqliteContactRepository
 import br.com.estouseguro.data.repository.SqliteSmsDeliveryRepository
@@ -11,6 +12,7 @@ import br.com.estouseguro.domain.usecase.LoadDashboard
 import br.com.estouseguro.domain.usecase.LoadSmsDeliveryStatus
 import br.com.estouseguro.domain.usecase.ManageContacts
 import br.com.estouseguro.domain.usecase.ManageMedicalProfile
+import br.com.estouseguro.domain.usecase.ManageDocumentVault
 import br.com.estouseguro.domain.usecase.PrepareEmergencyAlert
 import br.com.estouseguro.platform.AndroidLocationProvider
 import br.com.estouseguro.platform.SmsAlertDispatcher
@@ -30,6 +32,7 @@ class AppContainer(application: Application) {
     val sessionRepository = SecureSessionRepository(application)
     val manageContacts = ManageContacts(contactRepository)
     val manageMedicalProfile = ManageMedicalProfile(KeystoreMedicalProfileRepository(application))
+    val manageDocumentVault = ManageDocumentVault(KeystoreDocumentVaultRepository(application))
     val loadDashboard = LoadDashboard(contactRepository, alertRepository)
     val loadSmsDeliveryStatus = LoadSmsDeliveryStatus(smsDeliveryRepository)
     val prepareEmergencyAlert = PrepareEmergencyAlert(contactRepository, alertRepository)

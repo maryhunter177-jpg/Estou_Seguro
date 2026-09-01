@@ -10,8 +10,8 @@ android {
         applicationId = "br.com.estouseguro"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.3.1"
+        versionCode = 8
+        versionName = "0.4.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -45,5 +45,6 @@ android {
 }
 
 dependencies {
+    implementation("androidx.core:core:1.17.0")
     testImplementation("junit:junit:4.13.2")
 }

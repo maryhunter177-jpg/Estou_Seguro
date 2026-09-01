@@ -4,6 +4,8 @@ import br.com.estouseguro.domain.model.AlertStatus
 import br.com.estouseguro.domain.model.BrazilianPhoneNumber
 import br.com.estouseguro.domain.model.DashboardSnapshot
 import br.com.estouseguro.domain.model.GeoPoint
+import br.com.estouseguro.domain.model.EmergencySmsFormatter
+import br.com.estouseguro.domain.model.SmsEmergencyCategory
 import br.com.estouseguro.domain.model.SafetyAlert
 import br.com.estouseguro.domain.model.SmsDeliveryAttempt
 import br.com.estouseguro.domain.model.TrustedContact
@@ -83,4 +85,6 @@ data class PreparedAlert(
     val alert: SafetyAlert,
     val message: String,
     val recipients: List<TrustedContact>,
-)
+) {
+    fun smsMessage(category: SmsEmergencyCategory): String = EmergencySmsFormatter.format(category, alert.location)
+}

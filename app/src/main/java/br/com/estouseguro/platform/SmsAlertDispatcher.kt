@@ -2,12 +2,14 @@ package br.com.estouseguro.platform
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import android.telephony.SmsManager
 import android.telephony.SubscriptionInfo
 import android.telephony.SubscriptionManager
@@ -97,6 +99,7 @@ class SmsAlertDispatcher(
                 ArrayList(attempts.map { statusIntent(it.id, alertId, claim.recipient, ACTION_SENT) }),
                 ArrayList(attempts.map { statusIntent(it.id, alertId, claim.recipient, ACTION_DELIVERED) }),
             )
+            scheduleCallbackTimeout(alertId, claim.recipient)
             DispatchProgress(queuedParts = parts.size)
         } catch (error: Exception) {
             attempts.forEach {
@@ -137,13 +140,36 @@ class SmsAlertDispatcher(
         )
     }
 
+    private fun scheduleCallbackTimeout(alertId: Long, recipient: String) {
+        val intent = Intent(context, SmsStatusReceiver::class.java).apply {
+            action = ACTION_TIMEOUT
+            putExtra(EXTRA_ALERT_ID, alertId)
+            putExtra(EXTRA_RECIPIENT, recipient)
+        }
+        val pending = PendingIntent.getBroadcast(
+            context,
+            (alertId xor recipient.hashCode().toLong() xor ACTION_TIMEOUT.hashCode().toLong()).hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        context.getSystemService(AlarmManager::class.java).setAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + CALLBACK_TIMEOUT_MILLIS,
+            pending,
+        )
+    }
+
     companion object {
         internal const val ACTION_SENT = "br.com.estouseguro.SMS_SENT"
         internal const val ACTION_DELIVERED = "br.com.estouseguro.SMS_DELIVERED"
+        internal const val ACTION_TIMEOUT = "br.com.estouseguro.SMS_TIMEOUT"
         internal const val EXTRA_ATTEMPT_ID = "attempt_id"
         internal const val EXTRA_ALERT_ID = "alert_id"
         internal const val EXTRA_RECIPIENT = "recipient"
-        internal const val RESULT_IMMEDIATE_EXCEPTION = -10_001
+        const val RESULT_IMMEDIATE_EXCEPTION = -10_001
+        const val RESULT_NO_DEFAULT_SUBSCRIPTION = -10_002
+        const val RESULT_CALLBACK_TIMEOUT = -10_003
+        private const val CALLBACK_TIMEOUT_MILLIS = 45_000L
         private const val RESULT_INVALID_BRAZILIAN_NUMBER = "INVALID_BRAZILIAN_NUMBER"
 
         fun create(context: Context): SmsAlertDispatcher {
@@ -199,10 +225,32 @@ object SmsSubscriptions {
 /** Persists radio/network callbacks even if the app process was recreated. */
 class SmsStatusReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val attemptId = intent.getLongExtra(SmsAlertDispatcher.EXTRA_ATTEMPT_ID, 0)
-        if (attemptId <= 0) return
         val alertId = intent.getLongExtra(SmsAlertDispatcher.EXTRA_ALERT_ID, 0)
         val recipient = intent.getStringExtra(SmsAlertDispatcher.EXTRA_RECIPIENT).orEmpty()
+        val repository = SqliteSmsDeliveryRepository(EstouSeguroDatabase(context.applicationContext))
+
+        if (intent.action == SmsAlertDispatcher.ACTION_TIMEOUT) {
+            if (alertId <= 0 || recipient.isBlank()) return
+            val queuedParts = repository.listForAlert(alertId).filter {
+                it.recipient == recipient && it.status == SmsDeliveryStatus.QUEUED
+            }
+            if (queuedParts.isEmpty()) return
+            queuedParts.forEach {
+                repository.updateStatus(
+                    it.id,
+                    SmsDeliveryStatus.SEND_FAILED,
+                    SmsAlertDispatcher.RESULT_CALLBACK_TIMEOUT,
+                    System.currentTimeMillis(),
+                )
+            }
+            if (repository.completeRecipient(alertId, recipient, System.currentTimeMillis())) {
+                SmsAlertDispatcher.create(context).resume(alertId)
+            }
+            return
+        }
+
+        val attemptId = intent.getLongExtra(SmsAlertDispatcher.EXTRA_ATTEMPT_ID, 0)
+        if (attemptId <= 0) return
         val status = when (intent.action) {
             SmsAlertDispatcher.ACTION_SENT -> if (resultCode == Activity.RESULT_OK) {
                 SmsDeliveryStatus.HANDED_TO_RADIO
@@ -216,11 +264,14 @@ class SmsStatusReceiver : BroadcastReceiver() {
             }
             else -> return
         }
-        val repository = SqliteSmsDeliveryRepository(EstouSeguroDatabase(context.applicationContext))
+        val platformResult = if (
+            intent.action == SmsAlertDispatcher.ACTION_SENT &&
+            intent.getBooleanExtra("noDefault", false)
+        ) SmsAlertDispatcher.RESULT_NO_DEFAULT_SUBSCRIPTION else resultCode
         repository.updateStatus(
             attemptId,
             status,
-            resultCode,
+            platformResult,
             System.currentTimeMillis(),
         )
         if (intent.action != SmsAlertDispatcher.ACTION_SENT || alertId <= 0 || recipient.isBlank()) return

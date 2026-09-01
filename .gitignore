@@ -11,6 +11,7 @@ local.properties
 *.keystore
 .env
 .env.*
+!.env.example
 captures/
 .externalNativeBuild/
 .cxx/

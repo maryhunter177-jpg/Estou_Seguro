@@ -6,7 +6,7 @@
     <string name="brand_name">ESTOU SEGURO</string>
     <string name="info_with_value">ⓘ  %1$s</string>
     <string name="local_data_notice">⌾  Seus dados permanecem neste dispositivo</string>
-    <string name="mvp_legal_notice">MVP em desenvolvimento · Não substitui serviços públicos de emergência · Não garante entrega de mensagens</string>
+    <string name="mvp_legal_notice">Em perigo imediato, ligue 190 · O app não substitui polícia, saúde, Conselho Tutelar ou atendimento profissional · A entrega de mensagens depende da rede e da operadora</string>
     <string name="show_pin">Mostrar PIN</string>
     <string name="hide_pin">Ocultar PIN</string>
     <string name="pin_hidden">PIN oculto</string>

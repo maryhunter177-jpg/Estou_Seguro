@@ -38,6 +38,16 @@ class PrepareEmergencyAlertTest {
         assertEquals(1, alerts.items.size)
         assertTrue(result.message.contains("-23.55,-46.63"))
     }
+
+    @Test
+    fun `preserves every registered emergency contact`() {
+        contacts.items += TrustedContact(1, "Ana", "+5511999999999")
+        contacts.items += TrustedContact(2, "Bia", "+5521988887777")
+
+        val result = useCase.execute(null)
+
+        assertEquals(listOf("Ana", "Bia"), result.recipients.map { it.name })
+    }
 }
 
 private class FakeContactRepository : ContactRepository {

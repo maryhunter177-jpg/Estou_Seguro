@@ -2,17 +2,22 @@ package br.com.estouseguro
 
 import android.Manifest
 import android.app.AlertDialog
+import android.app.DatePickerDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.MediaStore
+import android.text.Editable
 import android.text.InputFilter
 import android.text.InputType
+import android.text.TextWatcher
 import android.text.method.PasswordTransformationMethod
 import android.view.KeyEvent
 import android.view.Gravity
@@ -21,25 +26,38 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import br.com.estouseguro.domain.model.BloodType
+import br.com.estouseguro.domain.model.BrazilianCpf
+import br.com.estouseguro.domain.model.BrazilianDate
 import br.com.estouseguro.domain.model.BrazilianPhoneNumber
 import br.com.estouseguro.domain.model.DashboardSnapshot
 import br.com.estouseguro.domain.model.EmergencyMedicalProfile
+import br.com.estouseguro.domain.model.DocumentType
+import br.com.estouseguro.domain.model.IdentityDocument
 import br.com.estouseguro.domain.model.SmsDeliveryAttempt
 import br.com.estouseguro.domain.model.SmsDeliveryStatus
+import br.com.estouseguro.domain.model.SmsEmergencyCategory
 import br.com.estouseguro.domain.model.TrustedContact
 import br.com.estouseguro.domain.usecase.PreparedAlert
+import br.com.estouseguro.domain.repository.DocumentSide
 import br.com.estouseguro.platform.ShareDispatcher
+import br.com.estouseguro.platform.SmsAlertDispatcher
 import br.com.estouseguro.platform.SmsDispatchResult
 import java.text.DateFormat
+import java.io.File
+import java.io.ByteArrayOutputStream
+import java.time.LocalDate
 import java.util.Date
 
 class MainActivity : android.app.Activity() {
@@ -55,6 +73,8 @@ class MainActivity : android.app.Activity() {
     private var pendingEmergencyType: EmergencyType = EmergencyType.GENERAL
     private var pendingPreparedAlert: PreparedAlert? = null
     private var smsDispatchInProgress = false
+    private var pendingDocumentImage: PendingDocumentImage? = null
+    private var pendingCaptureFile: File? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -258,6 +278,7 @@ class MainActivity : android.app.Activity() {
             addView(helperText("Após sua confirmação, o app tenta enviar um SMS individual para cada contato e informa falhas detectadas."))
         }
         content.addView(emergencyCard, blockParams())
+        content.addView(protectionSupportCard(), blockParams())
 
         content.addView(sectionHeader("Rede de confiança", "${snapshot.contacts.size} cadastrado(s)"))
         if (snapshot.contacts.isEmpty()) {
@@ -271,6 +292,9 @@ class MainActivity : android.app.Activity() {
         content.addView(actionButton("✓", "Cheguei bem", "Enviar um check-in para seus contatos") { performCheckIn() })
         content.addView(actionButton("+", "Ficha médica", "Dados opcionais protegidos no aparelho") {
             loadMedicalProfile()
+        })
+        content.addView(actionButton("▣", "Cofre de documentos", "CPF, CIN/RG, CNH, CTPS e fotos protegidas") {
+            loadDocumentVault()
         })
         content.addView(actionButton("☎", "Ligar 190", "Abrir o discador para emergência no Brasil") {
             startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:190")))
@@ -387,6 +411,18 @@ class MainActivity : android.app.Activity() {
             type = EmergencyType.SECURITY,
         ))
         addView(emergencyTypeButton(
+            icon = "♀",
+            title = "Violência contra a mulher",
+            description = "Agressão física, psicológica, sexual ou ameaça",
+            type = EmergencyType.DOMESTIC_VIOLENCE,
+        ))
+        addView(emergencyTypeButton(
+            icon = "✦",
+            title = "Criança ou adolescente em risco",
+            description = "Violência, abuso, abandono ou desaparecimento",
+            type = EmergencyType.CHILD_DANGER,
+        ))
+        addView(emergencyTypeButton(
             icon = "♡",
             title = "Crise de ansiedade",
             description = "Pedir apoio imediato à sua rede",
@@ -413,8 +449,10 @@ class MainActivity : android.app.Activity() {
             gravity = Gravity.CENTER
             textSize = 17f
             setTypeface(typeface, Typeface.BOLD)
-            setTextColor(if (type == EmergencyType.SECURITY) RED_DARK else NAVY)
-            background = rounded(if (type == EmergencyType.SECURITY) Color.rgb(255, 237, 235) else BLUE_SOFT, 11)
+            val isDanger = type == EmergencyType.SECURITY ||
+                type == EmergencyType.DOMESTIC_VIOLENCE || type == EmergencyType.CHILD_DANGER
+            setTextColor(if (isDanger) RED_DARK else NAVY)
+            background = rounded(if (isDanger) Color.rgb(255, 237, 235) else BLUE_SOFT, 11)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         }, LinearLayout.LayoutParams(dp(38), dp(38)).apply { marginEnd = dp(10) })
         addView(LinearLayout(this@MainActivity).apply {
@@ -439,6 +477,51 @@ class MainActivity : android.app.Activity() {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
         })
         layoutParams = blockParams(marginBottomDp = 7)
+    }
+
+    private fun protectionSupportCard(): View = card().apply {
+        addView(overline("PROTEÇÃO DE MULHERES E CRIANÇAS"))
+        addView(cardTitle("Você não está sozinha"))
+        addView(paragraph("Ameaças, humilhação, controle, perseguição, abuso e agressão também são violência. Em perigo agora, ligue 190. Para orientação e denúncia, use os canais abaixo."))
+        addView(actionButton("☎", "Perigo imediato — 190", "Polícia Militar") {
+            dialProtectionChannel("190")
+        })
+        addView(actionButton("♀", "Ligue 180", "Atendimento à mulher, gratuito e 24 horas") {
+            dialProtectionChannel("180")
+        })
+        addView(actionButton("✦", "Disque 100", "Violações contra crianças e direitos humanos") {
+            dialProtectionChannel("100")
+        })
+        addView(outlineButton("Entender os sinais e canais de ajuda") { showProtectionGuidance() })
+    }
+
+    private fun dialProtectionChannel(number: String) {
+        startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")))
+    }
+
+    private fun showProtectionGuidance() {
+        val message = """
+            PERIGO IMEDIATO
+            Ligue 190. O SOS do app também avisa sua rede com a localização disponível.
+
+            VIOLÊNCIA CONTRA A MULHER
+            Pode ser física, psicológica, sexual, patrimonial ou moral. Ameaça, humilhação, controle do dinheiro, isolamento, perseguição e vigilância constante são sinais importantes.
+
+            CRIANÇAS E ADOLESCENTES
+            Violência, abuso, exploração, negligência, abandono ou desaparecimento podem ser comunicados pelo Disque 100. Em risco imediato, ligue 190.
+
+            LIGUE 180
+            Orientação, denúncia e localização da rede especializada de atendimento à mulher. Serviço gratuito, 24 horas.
+
+            Este aplicativo não substitui polícia, serviços de saúde, Conselho Tutelar ou atendimento profissional.
+        """.trimIndent()
+        AlertDialog.Builder(this)
+            .setTitle("Proteção e canais de ajuda")
+            .setMessage(message)
+            .setNegativeButton("Disque 100") { _, _ -> dialProtectionChannel("100") }
+            .setNeutralButton("Ligue 180") { _, _ -> dialProtectionChannel("180") }
+            .setPositiveButton("Ligue 190") { _, _ -> dialProtectionChannel("190") }
+            .show()
     }
 
     private fun contactCard(contact: TrustedContact): View = card(compact = true).apply {
@@ -724,7 +807,7 @@ class MainActivity : android.app.Activity() {
             action = {
                 container.smsAlertDispatcher.send(
                     prepared.alert.id,
-                    prepared.message,
+                    prepared.smsMessage(pendingEmergencyType.smsCategory()),
                     prepared.recipients,
                 )
             },
@@ -750,26 +833,7 @@ class MainActivity : android.app.Activity() {
                     return
                 }
                 pendingPreparedAlert = null
-                val failed = result.immediateFailures.size
-                val message = if (failed == 0) {
-                    "Fila sequencial iniciada para ${result.recipientCount} contato(s). Cada SMS será liberado separadamente após a resposta do modem. A entrega depende da operadora."
-                } else {
-                    "A fila sequencial foi iniciada, mas $failed contato(s) têm número inválido ou falharam imediatamente. Revise os contatos destacados."
-                }
-                val whatsappContact = prepared.recipients.firstOrNull {
-                    BrazilianPhoneNumber.normalizeForSms(it.phone) != null
-                }
-                AlertDialog.Builder(this)
-                    .setTitle("Status do alerta")
-                    .setMessage(message)
-                    .setNeutralButton(
-                        whatsappContact?.let { "WhatsApp: ${it.name.take(16)}" } ?: "WhatsApp/outro app",
-                    ) { _, _ ->
-                        if (whatsappContact == null) ShareDispatcher.whatsApp(this, prepared.message)
-                        else ShareDispatcher.whatsApp(this, prepared.message, whatsappContact)
-                    }
-                    .setPositiveButton("Entendi") { _, _ -> showDashboard() }
-                    .show()
+                showSmsProgressDialog(prepared, result)
             }
             SmsDispatchResult.NoRecipients -> showSmsFallback(
                 prepared,
@@ -777,6 +841,108 @@ class MainActivity : android.app.Activity() {
             )
             SmsDispatchResult.UnsupportedDevice -> showSmsFallback(prepared, "Este aparelho não oferece envio direto de SMS.")
         }
+    }
+
+    private fun showSmsProgressDialog(prepared: PreparedAlert, accepted: SmsDispatchResult.Accepted) {
+        val message = TextView(this).apply {
+            textSize = 16f
+            setTextColor(TEXT)
+            setPadding(dp(24), dp(12), dp(24), dp(12))
+            text = "SMS automático iniciado para ${accepted.recipientCount} contato(s), um por vez. Aguardando resposta do modem..."
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Envio automático do SOS")
+            .setView(message)
+            .setNegativeButton("Sobre WhatsApp automático") { _, _ -> showWhatsAppAutomationExplanation() }
+            .setPositiveButton("Fechar", null)
+            .create()
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val startedAt = System.currentTimeMillis()
+        lateinit var poll: Runnable
+        poll = Runnable {
+            if (!dialog.isShowing) return@Runnable
+            runIo(
+                action = { container.loadSmsDeliveryStatus(prepared.alert.id) },
+                onSuccess = { attempts ->
+                    if (!dialog.isShowing) return@runIo
+                    message.text = smsProgressText(prepared, accepted.recipientCount, attempts)
+                    val responded = attempts.groupBy { it.recipient }.count { (_, parts) ->
+                        parts.isNotEmpty() && parts.all { it.status != SmsDeliveryStatus.QUEUED }
+                    }
+                    if (responded < accepted.recipientCount && System.currentTimeMillis() - startedAt < 65_000) {
+                        handler.postDelayed(poll, 1_500)
+                    }
+                },
+                onError = { message.text = "Não foi possível consultar o retorno do modem. Consulte Atividade recente." },
+            )
+        }
+        dialog.setOnDismissListener {
+            handler.removeCallbacksAndMessages(null)
+            showDashboard()
+        }
+        dialog.show()
+        handler.postDelayed(poll, 800)
+    }
+
+    private fun smsProgressText(
+        prepared: PreparedAlert,
+        recipientCount: Int,
+        attempts: List<SmsDeliveryAttempt>,
+    ): String {
+        val byPhone = prepared.recipients.associateBy { BrazilianPhoneNumber.normalizeForSms(it.phone) }
+        val rows = attempts.groupBy { it.recipient }.map { (phone, parts) ->
+            val name = byPhone[phone]?.name ?: "Contato final ${phone.takeLast(4)}"
+            val status = when {
+                parts.any { it.status == SmsDeliveryStatus.SEND_FAILED } -> {
+                    val code = parts.firstOrNull { it.status == SmsDeliveryStatus.SEND_FAILED }?.platformResultCode
+                    "FALHOU — ${smsFailureReason(code)}"
+                }
+                parts.all { it.status == SmsDeliveryStatus.DELIVERED } -> "ENTREGUE AO APARELHO"
+                parts.all { it.status == SmsDeliveryStatus.HANDED_TO_RADIO || it.status == SmsDeliveryStatus.DELIVERED } ->
+                    "ENVIADO À OPERADORA"
+                else -> "ENVIANDO..."
+            }
+            "$name: $status"
+        }
+        val waiting = (recipientCount - attempts.map { it.recipient }.distinct().size).coerceAtLeast(0)
+        return buildString {
+            appendLine("Envio direto, automático e individual:")
+            if (rows.isEmpty()) appendLine("Preparando o primeiro contato...") else appendLine(rows.joinToString("\n"))
+            if (waiting > 0) append("$waiting contato(s) aguardando na fila.")
+            else append("A entrega final ainda depende da operadora e do aparelho de destino.")
+        }
+    }
+
+    private fun smsFailureReason(code: Int?): String = when (code) {
+        android.telephony.SmsManager.RESULT_ERROR_GENERIC_FAILURE ->
+            "falha do chip/operadora; confira sinal, saldo e chip padrão de SMS"
+        android.telephony.SmsManager.RESULT_ERROR_RADIO_OFF -> "rádio ou modo avião ativado"
+        android.telephony.SmsManager.RESULT_ERROR_NO_SERVICE -> "sem sinal da operadora"
+        android.telephony.SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "limite de SMS do aparelho ou operadora"
+        android.telephony.SmsManager.RESULT_ERROR_FDN_CHECK_FAILURE -> "número bloqueado pela lista fixa do SIM"
+        android.telephony.SmsManager.RESULT_NETWORK_ERROR -> "erro de rede da operadora"
+        android.telephony.SmsManager.RESULT_MODEM_ERROR -> "erro interno do modem/chip"
+        SmsAlertDispatcher.RESULT_NO_DEFAULT_SUBSCRIPTION -> "nenhum chip padrão definido para SMS"
+        SmsAlertDispatcher.RESULT_CALLBACK_TIMEOUT -> "o modem não respondeu dentro do prazo"
+        SmsAlertDispatcher.RESULT_IMMEDIATE_EXCEPTION -> "o Android recusou o envio"
+        else -> "falha da operadora/modem (código ${code ?: "desconhecido"})"
+    }
+
+    private fun showWhatsAppAutomationExplanation() {
+        AlertDialog.Builder(this)
+            .setTitle("WhatsApp automático")
+            .setMessage("O WhatsApp pessoal não permite que outro aplicativo pressione Enviar sozinho. Para envio realmente automático a todos, o Estou Seguro precisa de um servidor integrado à API oficial do WhatsApp Business, com conta empresarial, consentimento dos contatos e modelo de mensagem aprovado. As credenciais nunca podem ficar dentro do APK.")
+            .setPositiveButton("Entendi", null)
+            .show()
+    }
+
+    private fun EmergencyType.smsCategory(): SmsEmergencyCategory = when (this) {
+        EmergencyType.GENERAL -> SmsEmergencyCategory.GENERAL
+        EmergencyType.MEDICAL -> SmsEmergencyCategory.MEDICAL
+        EmergencyType.SECURITY -> SmsEmergencyCategory.SECURITY
+        EmergencyType.DOMESTIC_VIOLENCE -> SmsEmergencyCategory.DOMESTIC_VIOLENCE
+        EmergencyType.CHILD_DANGER -> SmsEmergencyCategory.CHILD_DANGER
+        EmergencyType.ANXIETY -> SmsEmergencyCategory.ANXIETY
     }
 
     private fun showSmsFallback(prepared: PreparedAlert, reason: String) {
@@ -789,6 +955,256 @@ class MainActivity : android.app.Activity() {
                 ShareDispatcher.emergency(this, prepared.message, prepared.recipients)
             }
             .show()
+    }
+
+    private fun loadDocumentVault() {
+        runIo(
+            action = container.manageDocumentVault::list,
+            onSuccess = ::showDocumentVault,
+            onError = { showError("Não foi possível abrir o cofre protegido.") },
+        )
+    }
+
+    private fun showDocumentVault(documents: List<IdentityDocument>) {
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(8), dp(18), dp(12))
+            addView(paragraph("Acesso protegido pelo PIN. Números e fotos ficam criptografados somente neste aparelho e nunca são incluídos nos alertas."))
+        }
+        if (documents.isEmpty()) {
+            content.addView(paragraph("Nenhum documento cadastrado."))
+        } else {
+            documents.forEach { document ->
+                content.addView(documentVaultCard(document), blockParams(10))
+            }
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Cofre de documentos")
+            .setView(ScrollView(this).apply { addView(content) })
+            .setNegativeButton("Fechar", null)
+            .setPositiveButton("Adicionar documento", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                dialog.dismiss()
+                showDocumentEditor(null)
+            }
+        }
+        dialog.show()
+    }
+
+    private fun documentVaultCard(document: IdentityDocument): View = card(compact = true).apply {
+        addView(TextView(this@MainActivity).apply {
+            text = document.displayType
+            textSize = 16f
+            setTypeface(typeface, Typeface.BOLD)
+            setTextColor(TEXT)
+        })
+        addView(TextView(this@MainActivity).apply {
+            text = maskedDocumentNumber(document)
+            textSize = 14f
+            setTextColor(TEXT_MUTED)
+            setPadding(0, dp(3), 0, dp(8))
+        })
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.END
+            addView(smallActionButton("Abrir", NAVY) { showDocumentDetails(document) })
+            addView(smallActionButton("Fotos", BLUE) { showDocumentPhotos(document) })
+            addView(smallActionButton("Editar", NAVY) { showDocumentEditor(document) })
+        })
+    }
+
+    private fun maskedDocumentNumber(document: IdentityDocument): String = when (document.type) {
+        DocumentType.CPF -> BrazilianCpf.masked(document.number)
+        else -> "•••• ${document.number.filterNot(Char::isWhitespace).takeLast(4)}"
+    }
+
+    private fun showDocumentDetails(document: IdentityDocument) {
+        val details = buildString {
+            appendLine("Tipo: ${document.displayType}")
+            appendLine("Número: ${document.number}")
+            if (document.issuer.isNotBlank()) appendLine("Órgão emissor: ${document.issuer}")
+            if (document.expiryDateIso.isNotBlank()) {
+                appendLine("Validade: ${BrazilianDate.isoToDisplay(document.expiryDateIso)}")
+            }
+            if (document.notes.isNotBlank()) appendLine("Observações: ${document.notes}")
+            append("Fotos: ${if (document.hasFrontImage) "frente" else "sem frente"}; ${if (document.hasBackImage) "verso" else "sem verso"}")
+        }
+        AlertDialog.Builder(this)
+            .setTitle(document.displayType)
+            .setMessage(details)
+            .setNegativeButton("Excluir", null)
+            .setNeutralButton("Fotos") { _, _ -> showDocumentPhotos(document) }
+            .setPositiveButton("Fechar", null)
+            .create()
+            .also { dialog ->
+                dialog.setOnShowListener {
+                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(RED_DARK)
+                    dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener {
+                        AlertDialog.Builder(this)
+                            .setTitle("Excluir documento?")
+                            .setMessage("O cadastro e as fotos criptografadas serão apagados deste aparelho.")
+                            .setNegativeButton("Cancelar", null)
+                            .setPositiveButton("Excluir") { _, _ ->
+                                runIo(
+                                    action = { container.manageDocumentVault.delete(document.id) },
+                                    onSuccess = { dialog.dismiss(); loadDocumentVault() },
+                                    onError = { showError("Não foi possível excluir o documento.") },
+                                )
+                            }.show()
+                    }
+                }
+                dialog.show()
+            }
+    }
+
+    private fun showDocumentEditor(existing: IdentityDocument?) {
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(8), dp(20), dp(8))
+        }
+        form.addView(paragraph("Cadastre apenas documentos seus. Use “Outro documento” para tipos não listados."))
+        form.addView(fieldLabel("TIPO DE DOCUMENTO"))
+        val spinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                DocumentType.entries.map { it.label },
+            )
+            setSelection(existing?.type?.ordinal ?: 0)
+        }
+        form.addView(spinner, blockParams(12, 54))
+
+        fun field(label: String, hint: String, value: String, type: Int = InputType.TYPE_CLASS_TEXT): EditText {
+            val edit = input(hint, type).apply { setText(value) }
+            form.addView(fieldLabel(label)); form.addView(edit)
+            return edit
+        }
+        val customType = field("NOME DO TIPO (SE OUTRO)", "Ex.: carteira estudantil", existing?.customType.orEmpty())
+        val number = field("NÚMERO DO DOCUMENTO", "Número ou registro", existing?.number.orEmpty())
+        val issuer = field("ÓRGÃO EMISSOR", "Ex.: SSP/MG, DETRAN/MG", existing?.issuer.orEmpty())
+        val expiry = field(
+            "VALIDADE (OPCIONAL)", "DD/MM/AAAA",
+            existing?.expiryDateIso?.takeIf(String::isNotBlank)?.let(BrazilianDate::isoToDisplay).orEmpty(),
+            InputType.TYPE_CLASS_NUMBER,
+        ).also(::configureBrazilianDateField)
+        val notes = field("OBSERVAÇÕES", "Informações adicionais", existing?.notes.orEmpty())
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(if (existing == null) "Adicionar documento" else "Editar documento")
+            .setView(ScrollView(this).apply { addView(form) })
+            .setNegativeButton("Cancelar", null)
+            .setPositiveButton("Salvar", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val type = DocumentType.entries[spinner.selectedItemPosition]
+                val expiryIso = try {
+                    BrazilianDate.displayToIso(expiry.text.toString())
+                } catch (_: Exception) {
+                    expiry.error = "Informe uma data válida no formato DD/MM/AAAA."
+                    return@setOnClickListener
+                }
+                val candidate = IdentityDocument(
+                    id = existing?.id.orEmpty(), type = type,
+                    customType = customType.text.toString(), number = number.text.toString(),
+                    issuer = issuer.text.toString(), expiryDateIso = expiryIso,
+                    notes = notes.text.toString(),
+                    hasFrontImage = existing?.hasFrontImage == true,
+                    hasBackImage = existing?.hasBackImage == true,
+                    updatedAtEpochMillis = existing?.updatedAtEpochMillis ?: 0,
+                )
+                runIo(
+                    action = { container.manageDocumentVault.save(candidate) },
+                    onSuccess = { saved ->
+                        dialog.dismiss()
+                        Toast.makeText(this, "Documento salvo no cofre criptografado.", Toast.LENGTH_LONG).show()
+                        showDocumentPhotos(saved)
+                    },
+                    onError = { showError(it.message ?: "Revise os dados do documento.") },
+                )
+            }
+        }
+        dialog.show()
+    }
+
+    private fun showDocumentPhotos(document: IdentityDocument) {
+        val options = arrayOf(
+            "Tirar foto da frente", "Tirar foto do verso",
+            "Escolher frente da galeria", "Escolher verso da galeria",
+            "Ver foto da frente", "Ver foto do verso",
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Fotos — ${document.displayType}")
+            .setItems(options) { _, index ->
+                val side = if (index % 2 == 0) DocumentSide.FRONT else DocumentSide.BACK
+                when (index) {
+                    0, 1 -> startDocumentCapture(document, side)
+                    2, 3 -> startDocumentPicker(document, side)
+                    else -> showDocumentImage(document, side)
+                }
+            }
+            .setNegativeButton("Fechar", null)
+            .show()
+    }
+
+    private fun startDocumentCapture(document: IdentityDocument, side: DocumentSide) {
+        val directory = File(cacheDir, "document-capture").apply { mkdirs() }
+        val temporary = File.createTempFile("capture_", ".jpg", directory)
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", temporary)
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+            putExtra(MediaStore.EXTRA_OUTPUT, uri)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            clipData = android.content.ClipData.newRawUri("Foto do documento", uri)
+        }
+        pendingDocumentImage = PendingDocumentImage(document.id, side)
+        pendingCaptureFile = temporary
+        try {
+            startActivityForResult(intent, DOCUMENT_CAMERA_REQUEST)
+        } catch (_: Exception) {
+            pendingDocumentImage = null
+            pendingCaptureFile = null
+            temporary.delete()
+            showError("Nenhum aplicativo de câmera está disponível.")
+        }
+    }
+
+    private fun startDocumentPicker(document: IdentityDocument, side: DocumentSide) {
+        pendingDocumentImage = PendingDocumentImage(document.id, side)
+        startActivityForResult(
+            Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "image/*"
+            },
+            DOCUMENT_PICKER_REQUEST,
+        )
+    }
+
+    private fun showDocumentImage(document: IdentityDocument, side: DocumentSide) {
+        runIo(
+            action = { container.manageDocumentVault.loadImage(document.id, side) },
+            onSuccess = { bytes ->
+                if (bytes == null) {
+                    showError("Esta foto ainda não foi cadastrada.")
+                } else {
+                    val bitmap = decodePreview(bytes)
+                    bytes.fill(0)
+                    if (bitmap == null) showError("A imagem armazenada não pôde ser exibida.")
+                    else AlertDialog.Builder(this)
+                        .setTitle("${document.displayType} — ${if (side == DocumentSide.FRONT) "frente" else "verso"}")
+                        .setView(ImageView(this).apply {
+                            setImageBitmap(bitmap)
+                            adjustViewBounds = true
+                            scaleType = ImageView.ScaleType.FIT_CENTER
+                            setPadding(dp(8), dp(8), dp(8), dp(8))
+                        })
+                        .setPositiveButton("Fechar") { _, _ -> bitmap.recycle() }
+                        .show()
+                }
+            },
+            onError = { showError("Não foi possível abrir a foto protegida.") },
+        )
     }
 
     private fun medicalSummary(profile: EmergencyMedicalProfile?): String {
@@ -829,7 +1245,12 @@ class MainActivity : android.app.Activity() {
         }
 
         val preferredName = field("NOME PREFERIDO", "Como deseja ser identificada", existing?.preferredName.orEmpty())
-        val birthDate = field("DATA DE NASCIMENTO", "AAAA-MM-DD", existing?.birthDateIso.orEmpty(), InputType.TYPE_CLASS_DATETIME)
+        val birthDate = field(
+            "DATA DE NASCIMENTO",
+            "DD/MM/AAAA",
+            existing?.birthDateIso?.let { runCatching { BrazilianDate.isoToDisplay(it) }.getOrDefault("") }.orEmpty(),
+            InputType.TYPE_CLASS_NUMBER,
+        ).also(::configureBrazilianDateField)
         val bloodType = field("TIPO SANGUÍNEO", "Ex.: O+, A-, AB+", existing?.bloodType?.let(::bloodTypeLabel).orEmpty())
         val allergies = field("ALERGIAS", "Medicamentos, alimentos, látex...", existing?.allergies.orEmpty())
         val medications = field("MEDICAÇÕES", "Medicamentos de uso contínuo", existing?.medications.orEmpty())
@@ -853,9 +1274,15 @@ class MainActivity : android.app.Activity() {
                     bloodType.error = "Use A+, A-, B+, B-, AB+, AB-, O+ ou O-."
                     return@setOnClickListener
                 }
+                val birthDateIso = try {
+                    BrazilianDate.displayToIso(birthDate.text.toString())
+                } catch (_: Exception) {
+                    birthDate.error = "Informe uma data válida no formato DD/MM/AAAA."
+                    return@setOnClickListener
+                }
                 val candidate = EmergencyMedicalProfile(
                     preferredName = preferredName.text.toString(),
-                    birthDateIso = birthDate.text.toString(),
+                    birthDateIso = birthDateIso,
                     bloodType = parsedBloodType,
                     allergies = allergies.text.toString(),
                     medications = medications.text.toString(),
@@ -928,6 +1355,75 @@ class MainActivity : android.app.Activity() {
             this,
             container.sessionRepository.displayName(),
             currentSnapshot.contacts,
+        )
+    }
+
+    @Deprecated("Compatibilidade com captura e seleção de imagem no MVP nativo")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != DOCUMENT_CAMERA_REQUEST && requestCode != DOCUMENT_PICKER_REQUEST) return
+        val target = pendingDocumentImage
+        val capture = pendingCaptureFile
+        pendingDocumentImage = null
+        pendingCaptureFile = null
+        if (resultCode != RESULT_OK || target == null) {
+            capture?.delete()
+            return
+        }
+        runIo(
+            action = {
+                val bytes = if (requestCode == DOCUMENT_CAMERA_REQUEST) {
+                    requireNotNull(capture) { "Captura não encontrada." }
+                    require(capture.length() in 1..MAX_DOCUMENT_IMAGE_BYTES.toLong()) { "A foto deve ter no máximo 12 MB." }
+                    capture.readBytes()
+                } else {
+                    val uri = requireNotNull(data?.data) { "Imagem não selecionada." }
+                    readImageBytes(uri)
+                }
+                try {
+                    container.manageDocumentVault.saveImage(target.documentId, target.side, bytes, "image/jpeg")
+                } finally {
+                    bytes.fill(0)
+                    capture?.delete()
+                }
+            },
+            onSuccess = {
+                Toast.makeText(this, "Foto protegida e salva no cofre.", Toast.LENGTH_LONG).show()
+                loadDocumentVault()
+            },
+            onError = {
+                capture?.delete()
+                showError(it.message ?: "Não foi possível proteger a foto.")
+            },
+        )
+    }
+
+    private fun readImageBytes(uri: Uri): ByteArray {
+        contentResolver.openInputStream(uri).use { input ->
+            requireNotNull(input) { "Não foi possível abrir a imagem." }
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(64 * 1024)
+            var total = 0
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                total += count
+                require(total <= MAX_DOCUMENT_IMAGE_BYTES) { "A imagem deve ter no máximo 12 MB." }
+                output.write(buffer, 0, count)
+            }
+            buffer.fill(0)
+            return output.toByteArray()
+        }
+    }
+
+    private fun decodePreview(bytes: ByteArray): android.graphics.Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        var sample = 1
+        while (bounds.outWidth / sample > 1600 || bounds.outHeight / sample > 1600) sample *= 2
+        return BitmapFactory.decodeByteArray(
+            bytes, 0, bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sample.coerceAtLeast(1) },
         )
     }
 
@@ -1091,6 +1587,26 @@ class MainActivity : android.app.Activity() {
         setPadding(dp(14), dp(12), dp(14), dp(12))
         background = rounded(Color.rgb(250, 252, 255), 14, BORDER)
         layoutParams = blockParams(heightDp = 54, marginBottomDp = 12)
+    }
+
+    private fun configureBrazilianDateField(field: EditText) {
+        field.filters = arrayOf(InputFilter.LengthFilter(10))
+        field.contentDescription = "Data no formato dia, mês e ano"
+        var editing = false
+        field.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(value: Editable?) {
+                if (editing) return
+                val masked = BrazilianDate.mask(value?.toString().orEmpty())
+                if (masked != value?.toString()) {
+                    editing = true
+                    field.setText(masked)
+                    field.setSelection(masked.length)
+                    editing = false
+                }
+            }
+        })
     }
 
     private fun pinEntry(hintValue: String): PinEntry {
@@ -1286,6 +1802,11 @@ class MainActivity : android.app.Activity() {
         val input: EditText,
     )
 
+    private data class PendingDocumentImage(
+        val documentId: String,
+        val side: DocumentSide,
+    )
+
     private enum class EmergencyType(
         val confirmationTitle: String,
         val confirmationMessage: String,
@@ -1306,6 +1827,16 @@ class MainActivity : android.app.Activity() {
             "Sua rede será avisada sobre uma situação de roubo, sequestro ou ameaça.",
             "RISCO DE SEGURANÇA — ",
         ),
+        DOMESTIC_VIOLENCE(
+            "Pedir ajuda contra violência?",
+            "Sua rede será avisada sobre uma situação de agressão, abuso, ameaça ou violência psicológica. Em perigo imediato, ligue também para 190.",
+            "VIOLÊNCIA OU AMEAÇA CONTRA MULHER — PRECISO DE AJUDA AGORA. ",
+        ),
+        CHILD_DANGER(
+            "Pedir ajuda para uma criança?",
+            "Sua rede será avisada de que uma criança ou adolescente pode estar em risco. Em perigo imediato, ligue também para 190.",
+            "CRIANÇA OU ADOLESCENTE EM RISCO — AJUDA URGENTE. ",
+        ),
         ANXIETY(
             "Pedir apoio agora?",
             "Sua rede será avisada de que você está em crise e precisa de apoio.",
@@ -1316,6 +1847,9 @@ class MainActivity : android.app.Activity() {
     companion object {
         private const val LOCATION_REQUEST = 41
         private const val SMS_REQUEST = 42
+        private const val DOCUMENT_CAMERA_REQUEST = 43
+        private const val DOCUMENT_PICKER_REQUEST = 44
+        private const val MAX_DOCUMENT_IMAGE_BYTES = 12 * 1024 * 1024
         private const val EXTRA_OPEN_EMERGENCY = "open_emergency"
 
         private val NAVY_DARK = Color.rgb(9, 30, 53)

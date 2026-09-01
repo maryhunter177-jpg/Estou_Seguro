@@ -36,15 +36,15 @@ A aplicação usa um `AppContainer` explícito em vez de framework de injeção 
 - screenshots permitidos nesta versão de teste, conforme solicitado;
 - localização solicitada apenas durante o alerta, sem rastreamento em segundo plano;
 - SMS direto exige confirmação ou pressão longa no botão SOS e permissão explícita; a fila é sequencial e os callbacks da operadora são persistidos;
-- WhatsApp abre a conversa do contato cadastrado com texto preenchido, mas ainda exige confirmação; automação real depende da API Business oficial e de backend;
+- o envio automático pelo WhatsApp está sendo implementado no backend oficial; o APK pessoal não recebe credenciais da Meta;
 - ficha médica protegida com AES-256-GCM e chave não exportável no Android Keystore;
-- CPF não é coletado porque não é necessário para o primeiro atendimento;
+- documentos pessoais são opcionais e ficam criptografados localmente no cofre do aparelho;
 - banco sem fallback destrutivo de migração;
 - nenhum segredo, token ou chave embutido no app.
 
 ## Próximos incrementos
 
-1. API autenticada (OIDC/passkeys), PostgreSQL com PostGIS e sessões revogáveis.
+1. Evoluir a API sandbox para autenticação OIDC/passkeys, sessões revogáveis e operação monitorada.
 2. Sessão de trajeto e compartilhamento em tempo real via foreground service e backend, com aviso persistente, prazo de expiração e consentimento granular.
 3. Backend de notificações com fila transacional, idempotência, confirmação de entrega, observabilidade e escalonamento.
 4. Palavra-código e check-in agendado com modelo claro de ameaça e modo discreto revisado por especialistas.
@@ -59,3 +59,4 @@ A aplicação usa um `AppContainer` explícito em vez de framework de injeção 
 - `data`: SQLite e credencial local;
 - `platform`: localização e compartilhamento;
 - `MainActivity`: UI Android do incremento inicial.
+- `backend`: API Ktor, PostgreSQL, consentimento, fila idempotente e integração oficial com WhatsApp Business Cloud.

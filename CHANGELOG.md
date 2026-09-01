@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.1-debug — 2026-09-01
+
+### Corrigido
+
+- PIN inicia oculto com olho fechado; olho aberto representa PIN visível;
+- celulares brasileiros exigem DDD + nove dígitos e são armazenados em E.164;
+- números móveis incompletos aparecem destacados para correção;
+- SMS usa fila SQLite sequencial e durável, um contato por vez, avançando após callbacks `SENT`;
+- estados de SMS são monotônicos e a fila evita duplicação por alerta;
+- texto e destinatários transitórios são apagados ao concluir a fila;
+- WhatsApp abre diretamente a conversa do primeiro contato válido com mensagem preenchida.
+
+### Adicionado
+
+- botão de pressão longa para SOS sem PIN na tela bloqueada;
+- testes de visibilidade do PIN, telefone brasileiro e links `wa.me`;
+- `versionCode` 5 e `versionName` 0.3.1-debug.
+
+### Verificação
+
+- 30 testes unitários sem falhas;
+- Android Lint: 0 erros;
+- APK assinado e verificado com Android APK Signature Scheme v2.
+
 ## 0.3.0-debug — 2026-08-31
 
 ### Adicionado

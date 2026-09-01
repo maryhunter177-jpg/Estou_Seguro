@@ -1,6 +1,6 @@
 # Estou Seguro
 
-Aplicativo Android nativo de segurança pessoal, escrito em Kotlin. A versão atual entrega acesso local por PIN, contatos de confiança, alertas contextualizados, SMS direto por contato com acompanhamento técnico, última localização conhecida, ficha médica criptografada, check-in, atalhos de emergência e histórico local.
+Aplicativo Android nativo de segurança pessoal, escrito em Kotlin. A versão atual entrega acesso local por PIN, SOS por pressão longa sem desbloqueio, contatos de confiança validados, alertas contextualizados, SMS sequencial por contato com acompanhamento técnico, última localização conhecida, ficha médica criptografada, check-in, atalhos de emergência e histórico local.
 
 > **Importante:** este é um MVP em desenvolvimento. Ele não substitui serviços públicos de emergência e não pode garantir sinal, saldo, disponibilidade da operadora nem entrega. Para risco imediato no Brasil, use 190, SAMU 192 ou Bombeiros 193 conforme a ocorrência.
 
@@ -35,8 +35,8 @@ A aplicação usa um `AppContainer` explícito em vez de framework de injeção 
 - PIN derivado com PBKDF2-HMAC-SHA256, salt aleatório e comparação em tempo constante;
 - screenshots permitidos nesta versão de teste, conforme solicitado;
 - localização solicitada apenas durante o alerta, sem rastreamento em segundo plano;
-- SMS direto exige confirmação no app e permissão explícita; falhas e callbacks da operadora são persistidos;
-- WhatsApp exige escolha/confirmação no aplicativo; automação real depende da API Business oficial e de backend;
+- SMS direto exige confirmação ou pressão longa no botão SOS e permissão explícita; a fila é sequencial e os callbacks da operadora são persistidos;
+- WhatsApp abre a conversa do contato cadastrado com texto preenchido, mas ainda exige confirmação; automação real depende da API Business oficial e de backend;
 - ficha médica protegida com AES-256-GCM e chave não exportável no Android Keystore;
 - CPF não é coletado porque não é necessário para o primeiro atendimento;
 - banco sem fallback destrutivo de migração;

@@ -10,6 +10,7 @@ import br.com.estouseguro.domain.repository.AlertRepository
 import br.com.estouseguro.domain.repository.ContactRepository
 import br.com.estouseguro.domain.model.SmsDeliveryAttempt
 import br.com.estouseguro.domain.model.SmsDeliveryStatus
+import br.com.estouseguro.domain.model.SmsDispatchClaim
 import br.com.estouseguro.domain.repository.SmsDeliveryRepository
 
 class SqliteContactRepository(private val database: EstouSeguroDatabase) : ContactRepository {
@@ -84,8 +85,21 @@ class SqliteSmsDeliveryRepository(private val database: EstouSeguroDatabase) : S
             else put("platform_result_code", platformResultCode)
             put("updated_at", updatedAtEpochMillis)
         }
+        val allowedPrevious = when (status) {
+            SmsDeliveryStatus.HANDED_TO_RADIO -> listOf(SmsDeliveryStatus.QUEUED)
+            SmsDeliveryStatus.DELIVERED,
+            SmsDeliveryStatus.DELIVERY_FAILED ->
+                listOf(SmsDeliveryStatus.QUEUED, SmsDeliveryStatus.HANDED_TO_RADIO)
+            SmsDeliveryStatus.SEND_FAILED -> listOf(SmsDeliveryStatus.QUEUED)
+            SmsDeliveryStatus.QUEUED -> emptyList()
+        }
+        if (allowedPrevious.isEmpty()) return
+        val placeholders = allowedPrevious.joinToString(",") { "?" }
         database.writableDatabase.update(
-            "sms_delivery_attempt", values, "id = ?", arrayOf(id.toString()),
+            "sms_delivery_attempt",
+            values,
+            "id = ? AND status IN ($placeholders)",
+            arrayOf(id.toString(), *allowedPrevious.map { it.name }.toTypedArray()),
         )
     }
 
@@ -114,6 +128,117 @@ class SqliteSmsDeliveryRepository(private val database: EstouSeguroDatabase) : S
         return result
     }
 
+    override fun initializeDispatch(
+        alertId: Long,
+        message: String,
+        recipients: List<String>,
+        subscriptionId: Int?,
+        updatedAtEpochMillis: Long,
+    ): Boolean {
+        require(recipients.isNotEmpty())
+        require(recipients.none { '\n' in it })
+        val values = ContentValues().apply {
+            put("alert_id", alertId)
+            put("message", message)
+            put("recipients", recipients.joinToString("\n"))
+            if (subscriptionId == null) putNull("subscription_id") else put("subscription_id", subscriptionId)
+            put("next_recipient_index", 0)
+            put("state", QUEUE_READY)
+            put("updated_at", updatedAtEpochMillis)
+        }
+        return database.writableDatabase.insertWithOnConflict(
+            "sms_dispatch_queue", null, values, android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE,
+        ) != -1L
+    }
+
+    override fun claimNextRecipient(alertId: Long, updatedAtEpochMillis: Long): SmsDispatchClaim? {
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            val claim = db.query(
+                "sms_dispatch_queue",
+                arrayOf("message", "recipients", "subscription_id", "next_recipient_index", "state"),
+                "alert_id = ?",
+                arrayOf(alertId.toString()),
+                null, null, null,
+            ).use { cursor ->
+                if (!cursor.moveToFirst() || cursor.getString(4) != QUEUE_READY) return@use null
+                val recipients = cursor.getString(1).split('\n').filter(String::isNotBlank)
+                val index = cursor.getInt(3)
+                if (index !in recipients.indices) return@use null
+                SmsDispatchClaim(
+                    alertId = alertId,
+                    recipient = recipients[index],
+                    message = cursor.getString(0),
+                    subscriptionId = if (cursor.isNull(2)) null else cursor.getInt(2),
+                )
+            } ?: return null
+            val changed = db.update(
+                "sms_dispatch_queue",
+                ContentValues().apply {
+                    put("state", QUEUE_IN_FLIGHT)
+                    put("updated_at", updatedAtEpochMillis)
+                },
+                "alert_id = ? AND state = ?",
+                arrayOf(alertId.toString(), QUEUE_READY),
+            )
+            if (changed != 1) return null
+            db.setTransactionSuccessful()
+            return claim
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    override fun completeRecipient(
+        alertId: Long,
+        recipient: String,
+        updatedAtEpochMillis: Long,
+    ): Boolean {
+        val db = database.writableDatabase
+        db.beginTransaction()
+        try {
+            var hasNext = false
+            var currentIndex = -1
+            val canAdvance = db.query(
+                "sms_dispatch_queue",
+                arrayOf("recipients", "next_recipient_index", "state"),
+                "alert_id = ?",
+                arrayOf(alertId.toString()),
+                null, null, null,
+            ).use { cursor ->
+                if (!cursor.moveToFirst() || cursor.getString(2) != QUEUE_IN_FLIGHT) return@use false
+                val recipients = cursor.getString(0).split('\n').filter(String::isNotBlank)
+                val index = cursor.getInt(1)
+                if (recipients.getOrNull(index) != recipient) return@use false
+                currentIndex = index
+                hasNext = index + 1 < recipients.size
+                true
+            }
+            if (!canAdvance) return false
+            val changed = db.update(
+                "sms_dispatch_queue",
+                ContentValues().apply {
+                    put("next_recipient_index", currentIndex + 1)
+                    put("state", if (hasNext) QUEUE_READY else QUEUE_COMPLETE)
+                    put("updated_at", updatedAtEpochMillis)
+                    if (!hasNext) {
+                        // Keep the idempotency marker but erase transient sensitive payload data.
+                        put("message", "")
+                        put("recipients", "")
+                    }
+                },
+                "alert_id = ? AND state = ? AND next_recipient_index = ?",
+                arrayOf(alertId.toString(), QUEUE_IN_FLIGHT, currentIndex.toString()),
+            )
+            if (changed != 1) return false
+            db.setTransactionSuccessful()
+            return hasNext
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     private fun SmsDeliveryAttempt.toValues() = ContentValues().apply {
         put("alert_id", alertId)
         put("recipient", recipient)
@@ -126,6 +251,9 @@ class SqliteSmsDeliveryRepository(private val database: EstouSeguroDatabase) : S
     }
 
     companion object {
+        private const val QUEUE_READY = "READY"
+        private const val QUEUE_IN_FLIGHT = "IN_FLIGHT"
+        private const val QUEUE_COMPLETE = "COMPLETE"
         private val COLUMNS = arrayOf(
             "id", "alert_id", "recipient", "part_index", "part_count", "subscription_id",
             "status", "platform_result_code", "updated_at",

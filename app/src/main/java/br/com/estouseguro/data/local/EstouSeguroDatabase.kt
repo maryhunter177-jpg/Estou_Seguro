@@ -37,10 +37,12 @@ class EstouSeguroDatabase(context: Context) :
         )
         db.execSQL("CREATE INDEX idx_alert_created_at ON safety_alert(created_at DESC)")
         createSmsDeliveryTable(db)
+        createSmsDispatchQueueTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createSmsDeliveryTable(db)
+        if (oldVersion < 3) createSmsDispatchQueueTable(db)
         check(newVersion == DATABASE_VERSION) { "Migration $oldVersion -> $newVersion not implemented" }
     }
 
@@ -67,8 +69,25 @@ class EstouSeguroDatabase(context: Context) :
         )
     }
 
+    private fun createSmsDispatchQueueTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS sms_dispatch_queue (
+                alert_id INTEGER PRIMARY KEY,
+                message TEXT NOT NULL,
+                recipients TEXT NOT NULL,
+                subscription_id INTEGER,
+                next_recipient_index INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY(alert_id) REFERENCES safety_alert(id) ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+    }
+
     companion object {
         private const val DATABASE_NAME = "estou_seguro.db"
-        private const val DATABASE_VERSION = 2
+        private const val DATABASE_VERSION = 3
     }
 }

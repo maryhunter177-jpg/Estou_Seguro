@@ -9,7 +9,12 @@
     <string name="mvp_legal_notice">MVP em desenvolvimento · Não substitui serviços públicos de emergência · Não garante entrega de mensagens</string>
     <string name="show_pin">Mostrar PIN</string>
     <string name="hide_pin">Ocultar PIN</string>
+    <string name="pin_hidden">PIN oculto</string>
+    <string name="pin_visible">PIN visível</string>
     <string name="emergency_type_prompt">Ou informe o que está acontecendo</string>
     <string name="brand_promise">Proteção que acompanha você</string>
     <string name="brand_network">Sua rede de confiança a poucos toques</string>
+    <string name="locked_sos_button">SEGURE PARA SOS SEM PIN</string>
+    <string name="locked_sos_action">Segure para enviar alerta SOS sem desbloquear o aplicativo</string>
+    <string name="invalid_mobile_number">Número inválido: celular precisa de DDD + 9 dígitos</string>
 </resources>

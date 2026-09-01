@@ -25,7 +25,7 @@ object ShareDispatcher {
         emergency(context, message, contacts)
     }
 
-    /** Opens WhatsApp with the alert text. WhatsApp always requires the user to choose/confirm recipients. */
+    /** Opens WhatsApp's generic share flow. The user must choose and confirm a recipient. */
     fun whatsApp(context: Context, message: String) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -38,6 +38,37 @@ object ShareDispatcher {
             shareText(context, message)
         }
     }
+
+    /**
+     * Opens the conversation for a specific registered contact with the alert pre-filled.
+     * WhatsApp's public personal-app integration does not provide a supported silent-send action,
+     * so the user still confirms the final send inside WhatsApp.
+     */
+    fun whatsApp(context: Context, message: String, contact: TrustedContact) {
+        val link = WhatsAppLinkBuilder.build(contact.phone, message)
+        if (link == null) {
+            shareText(context, message)
+            return
+        }
+
+        val uri = Uri.parse(link)
+        if (startWhatsAppPackage(context, uri, "com.whatsapp")) return
+        if (startWhatsAppPackage(context, uri, "com.whatsapp.w4b")) return
+
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+        } catch (_: ActivityNotFoundException) {
+            shareText(context, message)
+        }
+    }
+
+    private fun startWhatsAppPackage(context: Context, uri: Uri, packageName: String): Boolean =
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, uri).setPackage(packageName))
+            true
+        } catch (_: ActivityNotFoundException) {
+            false
+        }
 
     private fun shareText(context: Context, message: String) {
         val intent = Intent(Intent.ACTION_SEND).apply {

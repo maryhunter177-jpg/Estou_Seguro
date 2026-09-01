@@ -24,6 +24,20 @@ class ManageContactsTest {
             useCase.add("Maria", "123")
         }
     }
+
+    @Test
+    fun `rejects legacy mobile missing ninth digit`() {
+        assertThrows(ContactValidationException::class.java) {
+            useCase.add("Amanda", "33 9966-7145")
+        }
+    }
+
+    @Test
+    fun `accepts Brazilian mobile only with DDD and ninth digit`() {
+        val contact = useCase.add("Amanda", "(33) 9 9966-7145")
+
+        assertEquals("+5533999667145", contact.phone)
+    }
 }
 
 private class RecordingContactRepository : ContactRepository {

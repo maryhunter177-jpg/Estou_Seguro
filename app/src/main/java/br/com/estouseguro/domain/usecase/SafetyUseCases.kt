@@ -1,6 +1,7 @@
 package br.com.estouseguro.domain.usecase
 
 import br.com.estouseguro.domain.model.AlertStatus
+import br.com.estouseguro.domain.model.BrazilianPhoneNumber
 import br.com.estouseguro.domain.model.DashboardSnapshot
 import br.com.estouseguro.domain.model.GeoPoint
 import br.com.estouseguro.domain.model.SafetyAlert
@@ -26,13 +27,13 @@ class ManageContacts(private val repository: ContactRepository) {
 
     private fun validate(name: String, phone: String): Pair<String, String> {
         val cleanName = name.trim()
-        val cleanPhone = phone.filter { it.isDigit() || it == '+' }
+        val cleanPhone = BrazilianPhoneNumber.normalizeForSms(phone)
         if (cleanName.length !in 2..80) {
             throw ContactValidationException("Informe um nome entre 2 e 80 caracteres.")
         }
-        if (cleanPhone.length !in 8..16) {
-            throw ContactValidationException("Informe um telefone válido com DDD.")
-        }
+        if (cleanPhone == null) throw ContactValidationException(
+            "Informe um telefone brasileiro completo: DDD + 9 dígitos para celular.",
+        )
         return cleanName to cleanPhone
     }
 

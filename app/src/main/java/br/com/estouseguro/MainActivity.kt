@@ -16,6 +16,7 @@ import android.text.InputType
 import android.text.method.PasswordTransformationMethod
 import android.view.KeyEvent
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
@@ -29,6 +30,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import br.com.estouseguro.domain.model.BloodType
+import br.com.estouseguro.domain.model.BrazilianPhoneNumber
 import br.com.estouseguro.domain.model.DashboardSnapshot
 import br.com.estouseguro.domain.model.EmergencyMedicalProfile
 import br.com.estouseguro.domain.model.SmsDeliveryAttempt
@@ -215,6 +217,8 @@ class MainActivity : android.app.Activity() {
         }
         form.addView(unlockButton)
         content.addView(form, blockParams())
+        content.addView(lockedEmergencyButton(), blockParams(8))
+        content.addView(helperText("Pressão longa aciona o SMS sem revelar contatos ou dados médicos."))
         content.addView(privacyNote())
         content.addView(brandSpotlight())
         setContentView(wrap(content))
@@ -289,7 +293,8 @@ class MainActivity : android.app.Activity() {
     }
 
     private fun readinessCard(snapshot: DashboardSnapshot): View {
-        val ready = snapshot.contacts.isNotEmpty()
+        val validCount = snapshot.contacts.count { BrazilianPhoneNumber.normalizeForSms(it.phone) != null }
+        val ready = snapshot.contacts.isNotEmpty() && validCount == snapshot.contacts.size
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -313,7 +318,9 @@ class MainActivity : android.app.Activity() {
                 })
                 addView(TextView(this@MainActivity).apply {
                     text = if (ready) {
-                        "${snapshot.contacts.size} contato(s) disponível(is) para alertas"
+                        "$validCount contato(s) válido(s) para alertas"
+                    } else if (snapshot.contacts.isNotEmpty()) {
+                        "Corrija ${snapshot.contacts.size - validCount} telefone(s) incompleto(s)"
                     } else {
                         "Adicione alguém para liberar alertas e check-ins"
                     }
@@ -339,6 +346,22 @@ class MainActivity : android.app.Activity() {
         contentDescription = "Preparar e compartilhar alerta de emergência"
         setOnClickListener { confirmEmergency(EmergencyType.GENERAL) }
         layoutParams = blockParams(heightDp = 72, marginBottomDp = 10)
+    }
+
+    private fun lockedEmergencyButton() = Button(this).apply {
+        text = getString(R.string.locked_sos_button)
+        textSize = 15f
+        isAllCaps = false
+        setTypeface(typeface, Typeface.BOLD)
+        setTextColor(Color.WHITE)
+        background = rounded(RED_DARK, 18)
+        contentDescription = getString(R.string.locked_sos_action)
+        setOnLongClickListener {
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            beginLockedEmergency()
+            true
+        }
+        layoutParams = blockParams(heightDp = 62, marginBottomDp = 8)
     }
 
     private fun emergencyTypeSelector(): View = LinearLayout(this).apply {
@@ -419,6 +442,7 @@ class MainActivity : android.app.Activity() {
     }
 
     private fun contactCard(contact: TrustedContact): View = card(compact = true).apply {
+        val phoneIsValid = BrazilianPhoneNumber.normalizeForSms(contact.phone) != null
         val infoRow = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -442,7 +466,13 @@ class MainActivity : android.app.Activity() {
             addView(TextView(this@MainActivity).apply {
                 text = contact.phone
                 textSize = 14f
-                setTextColor(TEXT_MUTED)
+                setTextColor(if (phoneIsValid) TEXT_MUTED else RED_DARK)
+            })
+            if (!phoneIsValid) addView(TextView(this@MainActivity).apply {
+                text = getString(R.string.invalid_mobile_number)
+                textSize = 11f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(RED_DARK)
             })
         }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         addView(infoRow)
@@ -560,7 +590,7 @@ class MainActivity : android.app.Activity() {
             setPadding(dp(20), dp(8), dp(20), 0)
         }
         val name = input("Nome", InputType.TYPE_CLASS_TEXT)
-        val phone = input("Telefone com DDD", InputType.TYPE_CLASS_PHONE)
+        val phone = input("Ex.: (33) 9 9999-9999", InputType.TYPE_CLASS_PHONE)
         if (existing != null) {
             name.setText(existing.name)
             phone.setText(existing.phone)
@@ -623,6 +653,10 @@ class MainActivity : android.app.Activity() {
             showError("Cadastre ao menos um contato de confiança.")
             return
         }
+        if (currentSnapshot.contacts.none { BrazilianPhoneNumber.normalizeForSms(it.phone) != null }) {
+            showError("Corrija o telefone dos contatos. Celular precisa de DDD + 9 dígitos.")
+            return
+        }
         if (!container.locationProvider.hasPermission()) {
             pendingEmergency = true
             requestPermissions(
@@ -632,6 +666,30 @@ class MainActivity : android.app.Activity() {
             return
         }
         prepareAndShareAlert()
+    }
+
+    private fun beginLockedEmergency() {
+        if (smsDispatchInProgress) return
+        pendingEmergencyType = EmergencyType.GENERAL
+        runIo(
+            action = container.loadDashboard::invoke,
+            onSuccess = { snapshot ->
+                currentSnapshot = snapshot
+                if (snapshot.contacts.none { BrazilianPhoneNumber.normalizeForSms(it.phone) != null }) {
+                    showError("Desbloqueie e corrija um contato: celular precisa de DDD + 9 dígitos.")
+                    return@runIo
+                }
+                if (!container.locationProvider.hasPermission()) {
+                    Toast.makeText(
+                        this,
+                        "Localização não autorizada; enviando SOS sem localização.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+                prepareAndShareAlert()
+            },
+            onError = { showError("Não foi possível carregar sua rede de emergência.") },
+        )
     }
 
     private fun prepareAndShareAlert() {
@@ -694,20 +752,29 @@ class MainActivity : android.app.Activity() {
                 pendingPreparedAlert = null
                 val failed = result.immediateFailures.size
                 val message = if (failed == 0) {
-                    "SMS solicitado para ${result.recipientCount} contato(s). A entrega depende da operadora e do aparelho de destino."
+                    "Fila sequencial iniciada para ${result.recipientCount} contato(s). Cada SMS será liberado separadamente após a resposta do modem. A entrega depende da operadora."
                 } else {
-                    "Parte do alerta entrou na fila, mas $failed contato(s) falharam imediatamente. Use outro canal com essas pessoas."
+                    "A fila sequencial foi iniciada, mas $failed contato(s) têm número inválido ou falharam imediatamente. Revise os contatos destacados."
+                }
+                val whatsappContact = prepared.recipients.firstOrNull {
+                    BrazilianPhoneNumber.normalizeForSms(it.phone) != null
                 }
                 AlertDialog.Builder(this)
                     .setTitle("Status do alerta")
                     .setMessage(message)
-                    .setNeutralButton("WhatsApp/outro app") { _, _ ->
-                        ShareDispatcher.whatsApp(this, prepared.message)
+                    .setNeutralButton(
+                        whatsappContact?.let { "WhatsApp: ${it.name.take(16)}" } ?: "WhatsApp/outro app",
+                    ) { _, _ ->
+                        if (whatsappContact == null) ShareDispatcher.whatsApp(this, prepared.message)
+                        else ShareDispatcher.whatsApp(this, prepared.message, whatsappContact)
                     }
                     .setPositiveButton("Entendi") { _, _ -> showDashboard() }
                     .show()
             }
-            SmsDispatchResult.NoRecipients -> showSmsFallback(prepared, "Nenhum telefone válido foi encontrado.")
+            SmsDispatchResult.NoRecipients -> showSmsFallback(
+                prepared,
+                "Nenhum telefone válido foi encontrado. Celular brasileiro precisa de DDD + 9 dígitos.",
+            )
             SmsDispatchResult.UnsupportedDevice -> showSmsFallback(prepared, "Este aparelho não oferece envio direto de SMS.")
         }
     }
@@ -1041,20 +1108,41 @@ class MainActivity : android.app.Activity() {
             setAutofillHints(View.AUTOFILL_HINT_PASSWORD)
         }
         val toggle = ImageButton(this).apply {
-            setImageResource(R.drawable.ic_visibility)
             background = null
-            contentDescription = getString(R.string.show_pin)
             setPadding(dp(12), dp(12), dp(12), dp(12))
         }
-        var visible = false
+        var visibilityState = PinVisibilityState.HIDDEN
+
+        fun renderVisibilityState() {
+            // The icon represents the current state. The accessible label and tooltip
+            // describe the action that will run when the button is activated.
+            input.transformationMethod = if (visibilityState.isVisible) {
+                null
+            } else {
+                PasswordTransformationMethod.getInstance()
+            }
+            toggle.setImageResource(
+                if (visibilityState.isVisible) R.drawable.ic_visibility else R.drawable.ic_visibility_off,
+            )
+            toggle.contentDescription = getString(
+                if (visibilityState.isVisible) R.string.hide_pin else R.string.show_pin,
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                toggle.stateDescription = getString(
+                    if (visibilityState.isVisible) R.string.pin_visible else R.string.pin_hidden,
+                )
+            }
+            toggle.tooltipText = toggle.contentDescription
+        }
+
         toggle.setOnClickListener {
-            visible = !visible
-            input.transformationMethod = if (visible) null else PasswordTransformationMethod.getInstance()
-            toggle.setImageResource(if (visible) R.drawable.ic_visibility_off else R.drawable.ic_visibility)
-            toggle.contentDescription = getString(if (visible) R.string.hide_pin else R.string.show_pin)
+            visibilityState = visibilityState.toggled()
+            renderVisibilityState()
             input.setSelection(input.text.length)
             input.requestFocus()
         }
+        // Do not rely only on inputType: explicitly render the safe initial state.
+        renderVisibilityState()
         val field = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -1249,4 +1337,11 @@ class MainActivity : android.app.Activity() {
         private val AMBER_DARK = Color.rgb(132, 76, 3)
         private val AMBER_SOFT = Color.rgb(255, 243, 214)
     }
+}
+
+internal enum class PinVisibilityState(val isVisible: Boolean) {
+    HIDDEN(false),
+    VISIBLE(true);
+
+    fun toggled(): PinVisibilityState = if (this == HIDDEN) VISIBLE else HIDDEN
 }

@@ -36,6 +36,14 @@ data class SmsDeliveryAttempt(
     val updatedAtEpochMillis: Long,
 )
 
+/** A single recipient atomically claimed from the durable SMS dispatch queue. */
+data class SmsDispatchClaim(
+    val alertId: Long,
+    val recipient: String,
+    val message: String,
+    val subscriptionId: Int?,
+)
+
 data class SafetyAlert(
     val id: Long = 0,
     val createdAtEpochMillis: Long,

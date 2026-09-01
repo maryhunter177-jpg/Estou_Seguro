@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="open_emergency"
+        android:enabled="true"
+        android:icon="@drawable/logo_app"
+        android:shortcutShortLabel="@string/shortcut_emergency_short"
+        android:shortcutLongLabel="@string/shortcut_emergency_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="br.com.estouseguro"
+            android:targetClass="br.com.estouseguro.MainActivity">
+            <extra android:name="open_emergency" android:value="true" />
+        </intent>
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+</shortcuts>

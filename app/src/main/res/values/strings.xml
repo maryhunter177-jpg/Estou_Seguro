@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="shortcut_emergency_short">Emergência</string>
+    <string name="shortcut_emergency_long">Abrir central de emergência</string>
+    <string name="emergency_button">SOS   PRECISO DE AJUDA</string>
+    <string name="brand_name">ESTOU SEGURO</string>
+    <string name="info_with_value">ⓘ  %1$s</string>
+    <string name="local_data_notice">⌾  Seus dados permanecem neste dispositivo</string>
+    <string name="mvp_legal_notice">MVP em desenvolvimento · Não substitui serviços públicos de emergência · Não garante entrega de mensagens</string>
+    <string name="show_pin">Mostrar PIN</string>
+    <string name="hide_pin">Ocultar PIN</string>
+    <string name="emergency_type_prompt">Ou informe o que está acontecendo</string>
+    <string name="brand_promise">Proteção que acompanha você</string>
+    <string name="brand_network">Sua rede de confiança a poucos toques</string>
+</resources>
